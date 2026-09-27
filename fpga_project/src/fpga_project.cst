@@ -1,0 +1,22 @@
+// Tang Primer 25K Dock, 3.3 V I/O.
+// E2 is the 50 MHz oscillator pin.  It is multiplexed with CPU/SSPI pins.
+// In Dual-Purpose Pin settings, both "Use CPU as regular IO" and
+// "Use SSPI as regular IO" must be enabled.
+IO_LOC "clk"       E2;
+IO_LOC "key_s1"    H11;
+IO_LOC "key_s2"    H10;
+IO_LOC "uart_rx_pin" B3;
+// MAX98357 is connected on Dock header J3 beside the 5 V/GND pair.
+// J3-14/B2 is a dedicated I2C pin, so use three ordinary GPIOs instead:
+// J3-11=+5V, J3-12=GND, J3-15=F1, J3-16=F2, J3-17=A1.
+IO_LOC "i2s_bclk"  F1;
+IO_LOC "i2s_lrclk" F2;
+IO_LOC "i2s_din"   A1;
+
+IO_PORT "clk"       IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+IO_PORT "key_s1"    IO_TYPE=LVCMOS33 PULL_MODE=DOWN DRIVE=OFF BANK_VCCIO=3.3;
+IO_PORT "key_s2"    IO_TYPE=LVCMOS33 PULL_MODE=DOWN DRIVE=OFF BANK_VCCIO=3.3;
+IO_PORT "uart_rx_pin" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=OFF BANK_VCCIO=3.3;
+IO_PORT "i2s_bclk"  IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8   BANK_VCCIO=3.3;
+IO_PORT "i2s_lrclk" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8   BANK_VCCIO=3.3;
+IO_PORT "i2s_din"   IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8   BANK_VCCIO=3.3;

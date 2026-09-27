@@ -1,0 +1,30 @@
+# Gowin EDA generated output and per-user settings
+**/impl/
+*.gprj.user
+*.fs
+*.bin
+*.binx
+*.db
+*.vg
+*.log
+*.jou
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Archives and temporary files
+*.rar
+*.zip
+*.tmp
+*~

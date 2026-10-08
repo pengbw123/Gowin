@@ -82,9 +82,9 @@ Portamento只在LATCH非零且新音以连奏方式按下时启动。此时复�
 
 - Chorus不是多开几个合成振荡器。它保存约9～17 ms的历史音频，用0.35 Hz低频振荡器移动读取位置，再把这个时而稍快、时而稍慢的延迟副本与原声叠加。因此副本会产生轻微动态失谐，听起来像多人齐奏。
 - Delay把较长时间以前的采样读出来并混回输出，同时把旧回声的一半重新写回延迟线，因此形成一次比一次小的清晰重复声。TEMPO改变约42～208 ms的间隔，GATE改变效果量。
-- Reverb使用1499、1777、2137采样三条不同长度的反馈梳状延迟模拟不同墙面反射，再通过521采样全通扩散器把离散反射打散成密集尾音。SWING控制混响量。
+- Reverb使用1499、1777、2137采样三条不同长度的反馈梳状延迟模拟不同墙面反射，再通过521采样全通扩散器把离散反射打散成密集尾音。三路反馈为3/4、输入注入为1/2，保留上一版明显的0.7～1.0秒尾音。所有反馈加法均先符号扩展到32位再饱和，避免16位中间结果回绕后将错误符号写回延迟RAM。SWING控制混响量。
 
-为适配25K的DSP余量，三个效果的干湿旋钮内部量化为12.5%、25%、37.5%、50%四档，旋钮0保持真正旁路。处理顺序为`Chorus -> Delay -> Reverb`。
+为适配25K的DSP余量，Chorus和Delay的干湿旋钮量化为12.5%、25%、37.5%、50%四档；Reverb为便于现场展示，采用更明显的12.5%、37.5%、62.5%、75%四档。旋钮0保持真正旁路，处理顺序为`Chorus -> Delay -> Reverb`。
 
 ## 串口上位机
 
@@ -107,19 +107,19 @@ cd tools
 
 编辑器支持：
 
-- C2/C3/C4/C6四个页面；
-- 每页16个谐波幅度；
+- C2/C3/C4/C6四个页面，每页用可拖动柱状图编辑16个谐波幅度；
 - 用0～4倍倍率同时缩放当前基准或全部四个基准的16个谐波；
 - 将当前基准的谐波幅度和一键归一到1；
 - 实时预览当前基准的单周期加法合成波形，并显示幅度和、峰值、RMS及削顶警告；
-- 每个谐波独立衰减时间；
+- 用9个可拖动控制点编辑65.4 Hz～16 kHz的全局频率—衰减曲线；
+- 保存或发送时按实际分量频率对曲线作对数插值，自动展开成原有4基准×16谐波的独立衰减参数；
 - Attack、Decay、Sustain、Release；
 - JSON保存/载入；
 - 一次发送全部133个配置包。
 
 参数表直接写入活动表，但正在发声的音符已保存自己的谐波状态，因此不会被突然改写。发送完成后重新按下琴键，即可听到新音色。发送约需0.14秒，发送期间不要演奏新音符。
 
-波形预览显示的是16个谐波在按键初始时刻的`sum(Ak*sin(k*x))`，不包含ADSR和各谐波随时间的独立衰减。整体倍率会直接改写界面中的16个幅度，放大后若复合波峰值超过1，曲线变红并提示可能削顶。
+波形预览显示的是16个谐波在按键初始时刻的`sum(Ak*sin(k*x))`，不包含ADSR和各谐波随时间的独立衰减。整体倍率会直接改写界面中的16个幅度，放大后若复合波峰值超过1，曲线变红并提示可能削顶。新版JSON会同时保存少量曲线控制点和展开后的64项衰减时间，因此仍兼容原UART协议与表生成流程；旧版JSON载入时会从原64项参数自动拟合控制曲线。
 
 ## 25键与OCT档位核对
 
@@ -140,7 +140,7 @@ cd tools
 命令行示例：
 
 ```powershell
-python .\tools\uart_synth_control.py COM11 send-preset .\tools\additive_piano_4anchor.json
+python .\tools\uart_synth_control.py COM11 send-preset .\tools\pianotone2.json
 python .\tools\uart_synth_control.py COM11 harmonic-amp C4 3 0.25 --commit
 python .\tools\uart_synth_control.py COM11 harmonic-decay C4 3 1800 --commit
 python .\tools\uart_synth_control.py COM11 adsr 30 500 0.18 800
@@ -167,7 +167,8 @@ CHECKSUM = XOR(CMD, DATA0..DATA7)
 
 ## 默认音色文件
 
-- `tools/additive_piano_4anchor.json`：上位机默认音色与ADSR；
+- `tools/pianotone2.json`：上电及上位机默认音色，幅度已按四个基准分别安全归一化，ADSR为30/500/0.18/800 ms；
+- `tools/additive_piano_4anchor.json`：另一组可载入的加法合成预设；
 - `src/generated/additive_sine_2048.mem`：2048点正弦ROM；
 - `src/generated/additive_harmonic_amp.mem`：4 × 16默认幅度；
 - `src/generated/additive_harmonic_decay.mem`：4 × 16默认衰减系数；
@@ -200,12 +201,25 @@ python .\tools\generate_additive_tables.py
 
 | 资源 | 使用量 |
 | --- | ---: |
-| Logic | 11879 / 23040，52% |
-| Register | 5021 / 23280，22% |
+| Logic | 13457 / 23040，59% |
+| Register | 5126 / 23280，23% |
 | BSRAM | 47 / 56，84% |
-| DSP | 25 / 28，90% |
+| DSP | 24.5 / 28，88% |
 
-50 MHz音频域实际Fmax为50.296 MHz，47.917 MHz USB域实际Fmax为62.896 MHz，TNS为0，无Setup/Hold违例。生成文件为 `impl/pnr/fpga_project.fs`。25K资源已经较紧，后续大型效果扩展应迁移到60K，而不是继续复制长延迟线或乘法器。
+50 MHz音频域实际Fmax为50.904 MHz，47.917 MHz USB域实际Fmax为58.435 MHz，TNS为0，无Setup/Hold违例。生成文件为 `impl/pnr/fpga_project.fs`。25K资源已经较紧，后续大型效果扩展应迁移到60K，而不是继续复制长延迟线或乘法器。
+
+## 长时间演奏的数字自恢复
+
+实际音量较小，目前不再把MAX98357过温/过流当作主要根因，并已撤回专门针对功放保护的100 ms I2S停钟和混响降增益。当前针对可证实的数字风险处理：
+
+1. 原USB MIDI驱动收到Bulk-IN STALL后会进入永久`midi_idle`，心跳可以继续，但从此不再轮询键盘。现改为STALL或连续16次传输错误后自动重置根端口并重新枚举；
+2. USB软核等待MIDI邮箱时增加20 ms超时，不再被一次丢失应答永久卡住；
+3. FPGA监视软核每秒的UART心跳。连续3秒没有任何UART写操作时，自动复位USB软核、跨时钟邮箱和音频状态，之后键盘会重新枚举；
+4. 合成器状态机若约1.3 ms仍未回到空闲态，会就地清除异常声部；
+5. 效果器的混音、Delay、Comb和All-pass加法全部改为32位中间结果后再饱和，避免反馈状态发生16位回绕；
+6. 力度增益从通过动态声部索引直接驱动乘法器，改为Note On时预计算、渲染时寄存。50 MHz域最差布线余量从0.089 ns提高到0.355 ns。
+
+如果实板再次静音，请保留115200串口输出：若看到新的启动Banner和枚举信息，表示硬件看门狗捕获了软核停滞；如果出现`USB-MIDI endpoint stalled; re-enumerating`或`USB-MIDI repeated errors; re-enumerating`，表示端点自恢复被触发；如果心跳、NOTE ON和NOTE OFF均正常却仍无声，才应继续检查I2S/功放链路。
 
 RTL回归测试位于`sim/tb_midi_poly_synth.v`和`sim/tb_midi_poly_audio.v`。测试覆盖C2/C3/C4/C6四个锚点、C4～C6的C5中点和C#4非锚点，检查谐波初始化、DDS相位步进及完整音频输出；当前六个测试音峰值均非零并通过。
 

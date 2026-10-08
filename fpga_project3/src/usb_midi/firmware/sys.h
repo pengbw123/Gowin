@@ -99,6 +99,7 @@ void*  memset(void *dest, uint8_t val, uint32_t len);
 void   prn_all(TASK *task);
 // task.c
 void   root_config(int speed, int enable_sof);
+void   restart_root_task(TASK *task);
 TASK  *clr_task(TASK *task);
 TASK  *new_task(void);
 // req.c

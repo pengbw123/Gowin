@@ -42,4 +42,5 @@ Thumbs.db
 **/src/generated/tone_filter_*_curve.mem
 **/src/generated/tone_wavetable.mem
 **/tools/pianotone*.json
+!fpga_project3/tools/pianotone2.json
 **/tools/tone3.json

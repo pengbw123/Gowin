@@ -1,4 +1,9 @@
-"""Tkinter editor for four pitch anchors and sixteen additive harmonics."""
+"""Interactive editor for the four-anchor additive synthesizer.
+
+The UI exposes four draggable 16-bin spectra and one global frequency/decay
+curve.  Before save/send the curve is sampled at every anchor partial and
+expanded into the FPGA's existing 4 x 16 table, so the UART/RTL stay compatible.
+"""
 
 from __future__ import annotations
 
@@ -9,36 +14,197 @@ import tkinter as tk
 from copy import deepcopy
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from typing import Callable
 
-from additive_uart_protocol import ANCHOR_NAMES, load_preset, preset_packets, send_packets
-
+from additive_uart_protocol import (
+    ANCHOR_MIDI_NOTES, ANCHOR_NAMES, load_preset, preset_packets, send_packets,
+)
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_PRESET = HERE / "additive_piano_4anchor.json"
+DEFAULT_PRESET = HERE / "pianotone2.json"
+DECAY_FREQUENCIES_HZ = (65.4, 130.8, 261.6, 523.3, 1046.5, 2093.0, 4186.0, 8372.0, 16000.0)
+MIN_DECAY_MS, MAX_DECAY_MS = 100.0, 20000.0
+
+
+def midi_frequency(note: int) -> float:
+    return 440.0 * 2.0 ** ((note - 69) / 12.0)
+
+
+def log_interpolate(xs: list[float], ys: list[float], x: float) -> float:
+    """Interpolate positive values in log-frequency/log-time space."""
+    lx = math.log(max(x, 1.0))
+    lxs = [math.log(max(value, 1.0)) for value in xs]
+    lys = [math.log(max(value, MIN_DECAY_MS)) for value in ys]
+    if lx <= lxs[0]:
+        return math.exp(lys[0])
+    if lx >= lxs[-1]:
+        return math.exp(lys[-1])
+    for index in range(len(lxs) - 1):
+        if lxs[index] <= lx <= lxs[index + 1]:
+            fraction = (lx - lxs[index]) / (lxs[index + 1] - lxs[index])
+            return math.exp(lys[index] + fraction * (lys[index + 1] - lys[index]))
+    return math.exp(lys[-1])
+
+
+class HarmonicBarCanvas(tk.Canvas):
+    """Draggable sixteen-bin harmonic spectrum."""
+
+    def __init__(self, master: tk.Misc, anchor: int,
+                 on_change: Callable[[int, int, float], None],
+                 on_select: Callable[[int, int], None]) -> None:
+        super().__init__(master, height=245, background="#0b111b",
+                         highlightthickness=1, highlightbackground="#31445a",
+                         cursor="sb_v_double_arrow")
+        self.anchor, self.on_change, self.on_select = anchor, on_change, on_select
+        self.values, self.selected = [0.0] * 16, 0
+        self.bind("<Configure>", lambda _event: self.redraw())
+        self.bind("<Button-1>", self._mouse_update)
+        self.bind("<B1-Motion>", self._mouse_update)
+
+    def set_values(self, values: list[float]) -> None:
+        self.values = [max(0.0, min(1.0, float(value))) for value in values]
+        self.redraw()
+
+    def _geometry(self) -> tuple[float, float, float, float]:
+        return 42.0, 15.0, max(320.0, self.winfo_width() - 12.0), max(140.0, self.winfo_height() - 31.0)
+
+    def _mouse_update(self, event: tk.Event) -> None:
+        left, top, right, bottom = self._geometry()
+        if not left <= event.x <= right:
+            return
+        harmonic = max(0, min(15, int((event.x - left) / ((right - left) / 16.0))))
+        value = max(0.0, min(1.0, (bottom - event.y) / max(1.0, bottom - top)))
+        self.selected, self.values[harmonic] = harmonic, value
+        self.on_select(self.anchor, harmonic)
+        self.on_change(self.anchor, harmonic, value)
+        self.redraw()
+
+    def redraw(self) -> None:
+        self.delete("all")
+        left, top, right, bottom = self._geometry()
+        for level in range(5):
+            value = level / 4.0
+            y = bottom - value * (bottom - top)
+            self.create_line(left, y, right, y, fill="#26364a")
+            self.create_text(left - 7, y, text=f"{value:.2g}", fill="#91a4b7", anchor="e", font=("Segoe UI", 8))
+        bar_width = (right - left) / 16.0
+        for harmonic, value in enumerate(self.values):
+            x0, x1 = left + harmonic * bar_width + 3, left + (harmonic + 1) * bar_width - 3
+            y = bottom - value * (bottom - top)
+            selected = harmonic == self.selected
+            self.create_rectangle(x0, y, x1, bottom,
+                                  fill="#60e4d0" if selected else "#69aee8",
+                                  outline="#e7fff9" if selected else "#82c5ff",
+                                  width=2 if selected else 1)
+            self.create_text((x0 + x1) / 2, bottom + 11, text=f"{harmonic + 1}×",
+                             fill="#b8c8d8", font=("Segoe UI", 8))
+
+
+class DecayCurveCanvas(tk.Canvas):
+    """Draggable log-frequency/log-time decay curve."""
+
+    def __init__(self, master: tk.Misc, on_change: Callable[[int, float], None]) -> None:
+        super().__init__(master, height=190, background="#120e25",
+                         highlightthickness=1, highlightbackground="#493b70",
+                         cursor="sb_v_double_arrow")
+        self.on_change = on_change
+        self.values = [4000.0] * len(DECAY_FREQUENCIES_HZ)
+        self.selected, self.dragging = 0, False
+        self.bind("<Configure>", lambda _event: self.redraw())
+        self.bind("<Button-1>", self._mouse_down)
+        self.bind("<B1-Motion>", self._mouse_drag)
+        self.bind("<ButtonRelease-1>", lambda _event: setattr(self, "dragging", False))
+
+    def set_values(self, values: list[float]) -> None:
+        self.values = [max(MIN_DECAY_MS, min(MAX_DECAY_MS, float(value))) for value in values]
+        self.redraw()
+
+    def _geometry(self) -> tuple[float, float, float, float]:
+        return 58.0, 13.0, max(420.0, self.winfo_width() - 14.0), max(115.0, self.winfo_height() - 30.0)
+
+    def _x(self, frequency: float) -> float:
+        left, _top, right, _bottom = self._geometry()
+        low, high = math.log(DECAY_FREQUENCIES_HZ[0]), math.log(DECAY_FREQUENCIES_HZ[-1])
+        return left + (math.log(frequency) - low) * (right - left) / (high - low)
+
+    def _y(self, milliseconds: float) -> float:
+        _left, top, _right, bottom = self._geometry()
+        low, high = math.log(MIN_DECAY_MS), math.log(MAX_DECAY_MS)
+        return bottom - (math.log(milliseconds) - low) * (bottom - top) / (high - low)
+
+    def _value_at_y(self, y: float) -> float:
+        _left, top, _right, bottom = self._geometry()
+        fraction = max(0.0, min(1.0, (bottom - y) / max(1.0, bottom - top)))
+        return math.exp(math.log(MIN_DECAY_MS) + fraction * math.log(MAX_DECAY_MS / MIN_DECAY_MS))
+
+    def _mouse_down(self, event: tk.Event) -> None:
+        self.selected = min(range(len(DECAY_FREQUENCIES_HZ)),
+                            key=lambda index: abs(event.x - self._x(DECAY_FREQUENCIES_HZ[index])))
+        self.dragging = True
+        self._set_y(event.y)
+
+    def _mouse_drag(self, event: tk.Event) -> None:
+        if self.dragging:
+            self._set_y(event.y)
+
+    def _set_y(self, y: float) -> None:
+        value = self._value_at_y(y)
+        self.values[self.selected] = value
+        self.on_change(self.selected, value)
+        self.redraw()
+
+    def redraw(self) -> None:
+        self.delete("all")
+        left, top, right, bottom = self._geometry()
+        for milliseconds in (100, 250, 500, 1000, 2500, 5000, 10000, 20000):
+            y = self._y(milliseconds)
+            self.create_line(left, y, right, y, fill="#2d2548")
+            label = f"{milliseconds / 1000:g}s" if milliseconds >= 1000 else f"{milliseconds}ms"
+            self.create_text(left - 7, y, text=label, fill="#a79ac4", anchor="e", font=("Segoe UI", 8))
+        points: list[float] = []
+        for frequency, milliseconds in zip(DECAY_FREQUENCIES_HZ, self.values):
+            x, y = self._x(frequency), self._y(milliseconds)
+            self.create_line(x, top, x, bottom, fill="#211a39")
+            label = f"{frequency / 1000:g}k" if frequency >= 1000 else f"{frequency:g}"
+            self.create_text(x, bottom + 11, text=label, fill="#a79ac4", font=("Segoe UI", 8))
+            points.extend((x, y))
+        self.create_line(*points, fill="#b57cff", width=2, smooth=True)
+        for index, (frequency, milliseconds) in enumerate(zip(DECAY_FREQUENCIES_HZ, self.values)):
+            x, y = self._x(frequency), self._y(milliseconds)
+            radius = 6 if index == self.selected else 4
+            self.create_oval(x - radius, y - radius, x + radius, y + radius,
+                             fill="#ffe47a" if index == self.selected else "#b57cff",
+                             outline="#fff5bd")
 
 
 class HarmonicEditor(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Primer 25K 四基准谐波编辑器")
-        self.geometry("1020x820")
-        self.minsize(920, 700)
+        self.title("Primer 25K 四基准加法音色编辑器")
+        self.geometry("1060x760")
+        self.minsize(920, 680)
         self.preset = load_preset(DEFAULT_PRESET)
         self.port_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="修改后点击“发送全部”；重新按键后使用新谐波参数。")
+        self.status_var = tk.StringVar(value="拖动柱形与衰减曲线后点击“发送全部”；新按下的琴键使用新参数。")
         self.scale_factor_var = tk.StringVar(value="1.0")
-        self.preview_summary_var = tk.StringVar(value="")
+        self.preview_summary_var = tk.StringVar()
+        self.selected_amp_var = tk.StringVar(value="0")
+        self.selected_amp_label_var = tk.StringVar(value="1×")
+        self.decay_point_var = tk.StringVar()
+        # Keep Python 3.7 compatibility (the bundled Gowin-side Python on some
+        # machines is older than the interpreter used during development).
         self._preview_job = None
+        self._selected_anchor, self._selected_harmonic = 0, 0
         self.adsr_vars = {name: tk.StringVar() for name in ("attack_ms", "decay_ms", "sustain", "release_ms")}
-        self.amp_vars: list[list[tk.StringVar]] = []
-        self.decay_vars: list[list[tk.StringVar]] = []
+        self.amp_values = [[0.0] * 16 for _ in range(4)]
+        self.decay_curve_values = [4000.0] * len(DECAY_FREQUENCIES_HZ)
+        self.bar_canvases: list[HarmonicBarCanvas] = []
         self._build()
         self._load_into_widgets(self.preset)
         self._refresh_ports()
 
     def _build(self) -> None:
-        toolbar = ttk.Frame(self, padding=(8, 5))
-        toolbar.pack(fill="x")
+        toolbar = ttk.Frame(self, padding=(8, 5)); toolbar.pack(fill="x")
         ttk.Label(toolbar, text="串口").pack(side="left")
         self.port_box = ttk.Combobox(toolbar, textvariable=self.port_var, width=12)
         self.port_box.pack(side="left", padx=5)
@@ -47,72 +213,42 @@ class HarmonicEditor(tk.Tk):
         ttk.Button(toolbar, text="保存", command=self._save_file).pack(side="left", padx=4)
         ttk.Button(toolbar, text="发送全部", command=self._send_all).pack(side="left", padx=(18, 4))
 
-        adsr = ttk.LabelFrame(self, text="全局幅度 ADSR", padding=(8, 5))
-        adsr.pack(fill="x", padx=8, pady=(0, 3))
+        adsr = ttk.LabelFrame(self, text="全局幅度 ADSR", padding=(8, 5)); adsr.pack(fill="x", padx=8, pady=(0, 3))
         labels = (("attack_ms", "Attack ms"), ("decay_ms", "Decay ms"),
                   ("sustain", "Sustain 0..1"), ("release_ms", "Release ms"))
         for column, (key, label) in enumerate(labels):
             ttk.Label(adsr, text=label).grid(row=0, column=column * 2, padx=(4, 2))
             ttk.Entry(adsr, textvariable=self.adsr_vars[key], width=10).grid(row=0, column=column * 2 + 1, padx=(0, 12))
 
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill="both", expand=True, padx=8, pady=2)
-        for anchor_index, anchor_name in enumerate(ANCHOR_NAMES):
-            frame = ttk.Frame(self.notebook, padding=(6, 3))
-            self.notebook.add(frame, text=anchor_name)
-            ttk.Label(frame, text="谐波").grid(row=0, column=0, padx=5)
-            ttk.Label(frame, text="幅度 0..1").grid(row=0, column=1, columnspan=2, padx=5)
-            ttk.Label(frame, text="衰减时间常数 ms（越大越慢，0=不额外衰减）").grid(row=0, column=3, padx=8)
-            anchor_amp: list[tk.StringVar] = []
-            anchor_decay: list[tk.StringVar] = []
-            for harmonic in range(16):
-                amp_var = tk.StringVar()
-                decay_var = tk.StringVar()
-                anchor_amp.append(amp_var)
-                anchor_decay.append(decay_var)
-                amp_var.trace_add("write", self._schedule_preview)
-                ttk.Label(frame, text=f"{harmonic + 1}×").grid(row=harmonic + 1, column=0, sticky="e", padx=5)
-                scale = ttk.Scale(frame, from_=0.0, to=1.0, variable=amp_var, orient="horizontal", length=360)
-                scale.grid(row=harmonic + 1, column=1, sticky="ew", padx=5)
-                ttk.Entry(frame, textvariable=amp_var, width=9).grid(row=harmonic + 1, column=2, padx=5)
-                ttk.Entry(frame, textvariable=decay_var, width=12).grid(row=harmonic + 1, column=3, padx=8)
-            frame.columnconfigure(1, weight=1)
-            self.amp_vars.append(anchor_amp)
-            self.decay_vars.append(anchor_decay)
+        middle = ttk.Panedwindow(self, orient="horizontal"); middle.pack(fill="both", expand=True, padx=8, pady=2)
+        spectra = ttk.LabelFrame(middle, text="四基准谐波幅度（拖动柱形）", padding=(6, 3)); middle.add(spectra, weight=3)
+        self.notebook = ttk.Notebook(spectra); self.notebook.pack(fill="both", expand=True)
+        for anchor, name in enumerate(ANCHOR_NAMES):
+            frame = ttk.Frame(self.notebook, padding=(4, 3)); self.notebook.add(frame, text=name)
+            canvas = HarmonicBarCanvas(frame, anchor, self._bar_changed, self._bar_selected)
+            canvas.pack(fill="both", expand=True); self.bar_canvases.append(canvas)
+        self.notebook.bind("<<NotebookTabChanged>>", self._tab_changed)
+        exact = ttk.Frame(spectra); exact.pack(fill="x", pady=(4, 0))
+        ttk.Label(exact, text="选中").pack(side="left")
+        ttk.Label(exact, textvariable=self.selected_amp_label_var, width=4).pack(side="left", padx=(3, 8))
+        ttk.Label(exact, text="幅度").pack(side="left")
+        ttk.Entry(exact, textvariable=self.selected_amp_var, width=8).pack(side="left", padx=3)
+        ttk.Button(exact, text="应用", command=self._apply_exact_amplitude).pack(side="left")
+        ttk.Label(exact, text="倍率").pack(side="left", padx=(10, 2))
+        ttk.Entry(exact, textvariable=self.scale_factor_var, width=6).pack(side="left", padx=2)
+        ttk.Button(exact, text="缩放当前", command=lambda: self._apply_harmonic_scale(False)).pack(side="left", padx=2)
+        ttk.Button(exact, text="缩放全部", command=lambda: self._apply_harmonic_scale(True)).pack(side="left", padx=2)
+        ttk.Button(exact, text="当前归一化", command=self._normalize_current_anchor).pack(side="left", padx=(6, 2))
 
-        self.notebook.bind("<<NotebookTabChanged>>", self._schedule_preview)
+        preview = ttk.LabelFrame(middle, text="当前基准单周期预览", padding=(5, 3)); middle.add(preview, weight=2)
+        self.wave_canvas = tk.Canvas(preview, background="#0c1420", highlightthickness=1, highlightbackground="#31445a")
+        self.wave_canvas.pack(fill="both", expand=True); self.wave_canvas.bind("<Configure>", self._schedule_preview)
+        ttk.Label(preview, textvariable=self.preview_summary_var, wraplength=330).pack(fill="x", pady=(3, 0))
 
-        preview = ttk.LabelFrame(
-            self,
-            text="当前基准的初始谐波单周期（不含ADSR与谐波衰减）",
-            padding=(6, 3),
-        )
-        preview.pack(fill="x", padx=8, pady=(2, 1))
-        controls = ttk.Frame(preview)
-        controls.pack(fill="x", pady=(0, 3))
-        ttk.Label(controls, text="整体谐波倍率").pack(side="left")
-        ttk.Entry(controls, textvariable=self.scale_factor_var, width=8).pack(side="left", padx=5)
-        ttk.Button(
-            controls, text="缩放当前基准", command=lambda: self._apply_harmonic_scale(False)
-        ).pack(side="left", padx=3)
-        ttk.Button(
-            controls, text="缩放全部基准", command=lambda: self._apply_harmonic_scale(True)
-        ).pack(side="left", padx=3)
-        ttk.Button(
-            controls, text="当前幅度和归一至1", command=self._normalize_current_anchor
-        ).pack(side="left", padx=(12, 3))
-        ttk.Label(controls, textvariable=self.preview_summary_var).pack(side="right")
-
-        self.wave_canvas = tk.Canvas(
-            preview,
-            height=105,
-            background="#0c1420",
-            highlightthickness=1,
-            highlightbackground="#31445a",
-        )
-        self.wave_canvas.pack(fill="x")
-        self.wave_canvas.bind("<Configure>", self._schedule_preview)
-
+        decay = ttk.LabelFrame(self, text="全局频率—谐波衰减曲线（纵轴越高衰减越慢；拖动控制点）", padding=(6, 3))
+        decay.pack(fill="x", padx=8, pady=(2, 1))
+        self.decay_canvas = DecayCurveCanvas(decay, self._decay_changed); self.decay_canvas.pack(fill="x")
+        ttk.Label(decay, textvariable=self.decay_point_var).pack(anchor="w", padx=4, pady=(2, 0))
         ttk.Label(self, textvariable=self.status_var, padding=(8, 4)).pack(fill="x")
 
     def _current_anchor_index(self) -> int:
@@ -121,246 +257,206 @@ class HarmonicEditor(tk.Tk):
         except (tk.TclError, ValueError):
             return 0
 
+    def _tab_changed(self, *_args) -> None:
+        self._selected_anchor = self._current_anchor_index()
+        self._selected_harmonic = self.bar_canvases[self._selected_anchor].selected
+        self._sync_selected_amplitude(); self._schedule_preview()
+
+    def _bar_selected(self, anchor: int, harmonic: int) -> None:
+        self._selected_anchor, self._selected_harmonic = anchor, harmonic
+        self._sync_selected_amplitude()
+
+    def _bar_changed(self, anchor: int, harmonic: int, value: float) -> None:
+        self.amp_values[anchor][harmonic] = value
+        self._selected_anchor, self._selected_harmonic = anchor, harmonic
+        self._sync_selected_amplitude(); self._schedule_preview()
+
+    def _sync_selected_amplitude(self) -> None:
+        value = self.amp_values[self._selected_anchor][self._selected_harmonic]
+        self.selected_amp_label_var.set(f"{self._selected_harmonic + 1}×")
+        self.selected_amp_var.set(f"{value:.5f}")
+
+    def _apply_exact_amplitude(self) -> None:
+        try:
+            value = float(self.selected_amp_var.get())
+        except ValueError:
+            value = -1.0
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            messagebox.showerror("幅度错误", "幅度必须是0～1之间的数字。"); return
+        self.amp_values[self._selected_anchor][self._selected_harmonic] = value
+        self.bar_canvases[self._selected_anchor].set_values(self.amp_values[self._selected_anchor])
+        self._schedule_preview()
+
+    def _decay_changed(self, point: int, value: float) -> None:
+        self.decay_curve_values[point] = value
+        self.decay_point_var.set(f"当前点：{DECAY_FREQUENCIES_HZ[point]:g} Hz，时间常数 {value:.0f} ms；发送时自动展开为4×16组参数。")
+
     def _schedule_preview(self, *_args) -> None:
         if self._preview_job is not None:
             self.after_cancel(self._preview_job)
-        self._preview_job = self.after(80, self._draw_waveform_preview)
-
-    def _anchor_amplitudes(self, anchor_index: int) -> list[float] | None:
-        try:
-            values = [float(variable.get()) for variable in self.amp_vars[anchor_index]]
-        except (ValueError, IndexError):
-            return None
-        if any(not math.isfinite(value) for value in values):
-            return None
-        return values
+        self._preview_job = self.after(60, self._draw_waveform_preview)
 
     def _draw_waveform_preview(self) -> None:
-        self._preview_job = None
-        canvas = self.wave_canvas
-        canvas.delete("all")
-        width = max(400, canvas.winfo_width())
-        height = max(120, canvas.winfo_height())
-        middle = height / 2.0
-
+        self._preview_job = None; canvas = self.wave_canvas; canvas.delete("all")
+        width, height = max(280, canvas.winfo_width()), max(160, canvas.winfo_height()); middle = height / 2.0
         for division in range(9):
-            x = division * (width - 1) / 8.0
-            canvas.create_line(x, 0, x, height, fill="#203247")
+            x = division * (width - 1) / 8.0; canvas.create_line(x, 0, x, height, fill="#203247")
         for level in (-1.0, -0.5, 0.0, 0.5, 1.0):
-            y = middle - level * (height * 0.43)
-            canvas.create_line(
-                0, y, width, y,
-                fill="#52677d" if level == 0.0 else "#203247",
-            )
-
-        anchor_index = self._current_anchor_index()
-        amplitudes = self._anchor_amplitudes(anchor_index)
-        if amplitudes is None:
-            self.preview_summary_var.set("幅度输入无效")
-            canvas.create_text(
-                width / 2, middle,
-                text="请输入有效的0～1谐波幅度",
-                fill="#ff8080",
-            )
-            return
-
-        sample_count = max(256, min(1024, width))
-        waveform = []
-        for sample_index in range(sample_count):
-            phase = 2.0 * math.pi * sample_index / sample_count
-            waveform.append(sum(
-                amplitude * math.sin((harmonic + 1) * phase)
-                for harmonic, amplitude in enumerate(amplitudes)
-            ))
-
-        peak = max(abs(value) for value in waveform) if waveform else 0.0
+            y = middle - level * height * 0.43
+            canvas.create_line(0, y, width, y, fill="#52677d" if level == 0.0 else "#203247")
+        anchor = self._current_anchor_index(); amplitudes = self.amp_values[anchor]
+        count = max(256, min(1024, width))
+        waveform = [sum(amp * math.sin((harmonic + 1) * 2 * math.pi * sample / count)
+                        for harmonic, amp in enumerate(amplitudes)) for sample in range(count)]
+        peak = max((abs(value) for value in waveform), default=0.0)
         rms = math.sqrt(sum(value * value for value in waveform) / len(waveform)) if waveform else 0.0
-        points = []
-        for sample_index, value in enumerate(waveform):
-            x = sample_index * (width - 1) / (sample_count - 1)
-            y = middle - value * (height * 0.43)
-            points.extend((x, y))
-        canvas.create_line(
-            *points,
-            fill="#ff7070" if peak > 1.0 else "#55e6d2",
-            width=2,
-            smooth=False,
-        )
-        warning = "，可能削顶" if peak > 1.0 else ""
-        self.preview_summary_var.set(
-            f"{ANCHOR_NAMES[anchor_index]}  Σ幅度={sum(amplitudes):.3f}  "
-            f"峰值={peak:.3f}  RMS={rms:.3f}{warning}"
-        )
+        points: list[float] = []; display_peak = max(1.0, peak)
+        for sample, value in enumerate(waveform):
+            points.extend((sample * (width - 1) / (count - 1), middle - value / display_peak * height * 0.43))
+        canvas.create_line(*points, fill="#ff7070" if peak > 1.0 else "#55e6d2", width=2)
+        warning = "；已缩放显示，实际可能削顶" if peak > 1.0 else ""
+        self.preview_summary_var.set(f"{ANCHOR_NAMES[anchor]}\nΣ幅度={sum(amplitudes):.3f}\n峰值={peak:.3f}  RMS={rms:.3f}{warning}")
 
     def _apply_harmonic_scale(self, all_anchors: bool) -> None:
         try:
             factor = float(self.scale_factor_var.get())
         except ValueError:
-            messagebox.showerror("倍率错误", "整体谐波倍率必须是数字。")
-            return
+            factor = -1.0
         if not math.isfinite(factor) or not 0.0 <= factor <= 4.0:
-            messagebox.showerror("倍率错误", "整体谐波倍率范围为0～4。")
-            return
-
-        indices = range(len(self.amp_vars)) if all_anchors else (self._current_anchor_index(),)
-        clipped = False
-        for anchor_index in indices:
-            amplitudes = self._anchor_amplitudes(anchor_index)
-            if amplitudes is None:
-                messagebox.showerror("参数错误", f"{ANCHOR_NAMES[anchor_index]}存在无效幅度。")
-                return
-            for variable, amplitude in zip(self.amp_vars[anchor_index], amplitudes):
-                scaled = amplitude * factor
-                if scaled > 1.0:
-                    clipped = True
-                variable.set(f"{min(1.0, max(0.0, scaled)):.5f}")
-
-        target = "全部四个基准" if all_anchors else ANCHOR_NAMES[self._current_anchor_index()]
-        suffix = "；个别谐波已限制到1.0" if clipped else ""
-        self.status_var.set(f"已将{target}的16个谐波同时乘以{factor:g}{suffix}。")
-        self._schedule_preview()
+            messagebox.showerror("倍率错误", "整体谐波倍率范围为0～4。"); return
+        anchors = range(4) if all_anchors else (self._current_anchor_index(),); clipped = False
+        for anchor in anchors:
+            clipped |= any(value * factor > 1.0 for value in self.amp_values[anchor])
+            self.amp_values[anchor] = [min(1.0, max(0.0, value * factor)) for value in self.amp_values[anchor]]
+            self.bar_canvases[anchor].set_values(self.amp_values[anchor])
+        self._sync_selected_amplitude(); self._schedule_preview()
+        self.status_var.set("谐波幅度已缩放" + ("；超过1的值已钳位。" if clipped else "。"))
 
     def _normalize_current_anchor(self) -> None:
-        anchor_index = self._current_anchor_index()
-        amplitudes = self._anchor_amplitudes(anchor_index)
-        if amplitudes is None:
-            messagebox.showerror("参数错误", "当前基准存在无效幅度。")
-            return
-        total = sum(amplitudes)
+        anchor = self._current_anchor_index(); total = sum(self.amp_values[anchor])
         if total <= 0.0:
-            messagebox.showerror("无法归一化", "当前16个谐波幅度全为0。")
-            return
-        for variable, amplitude in zip(self.amp_vars[anchor_index], amplitudes):
-            variable.set(f"{amplitude / total:.5f}")
-        self.status_var.set(f"已将{ANCHOR_NAMES[anchor_index]}的16个谐波幅度和归一到1。")
-        self._schedule_preview()
+            messagebox.showerror("无法归一化", "当前16个谐波幅度全为0。"); return
+        self.amp_values[anchor] = [value / total for value in self.amp_values[anchor]]
+        self.bar_canvases[anchor].set_values(self.amp_values[anchor])
+        self._sync_selected_amplitude(); self._schedule_preview()
 
     def _refresh_ports(self) -> None:
-        pyserial_available = True
-        port_source = "pyserial"
+        available, source = True, "pyserial"
         try:
             from serial.tools import list_ports
             ports = [port.device for port in list_ports.comports()]
         except ImportError:
-            pyserial_available = False
-            ports = []
-
-        # Port discovery does not have to fail silently merely because this
-        # particular Python installation lacks pyserial.  Windows/.NET can
-        # still enumerate the same COM names shown by Device Manager.
+            available, ports = False, []
         if not ports:
-            port_source = "dotnet"
+            source = "dotnet"
             try:
-                result = subprocess.run(
-                    [
-                        "powershell", "-NoProfile", "-Command",
-                        "[System.IO.Ports.SerialPort]::GetPortNames() | Sort-Object",
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=3,
-                )
+                result = subprocess.run(["powershell", "-NoProfile", "-Command",
+                                         "[System.IO.Ports.SerialPort]::GetPortNames() | Sort-Object"],
+                                        check=False, capture_output=True, text=True, timeout=3)
                 ports = [line.strip() for line in result.stdout.splitlines() if line.strip()]
             except (OSError, subprocess.SubprocessError):
                 pass
-
-        # Some BL616/FTDI driver combinations are visible in Device Manager
-        # but absent from GetPortNames/list_ports (especially after reconnect
-        # or when Windows reports an Unknown PnP status).  Keep those names as
-        # a final selectable fallback; opening the port still proves whether
-        # it is currently present.
         if not ports:
-            port_source = "pnp"
+            source = "pnp"
             try:
-                result = subprocess.run(
-                    [
-                        "powershell", "-NoProfile", "-Command",
-                        "Get-PnpDevice -Class Ports -ErrorAction SilentlyContinue | "
-                        "ForEach-Object { if ($_.FriendlyName -match '\\((COM[0-9]+)\\)') "
-                        "{ $Matches[1] } } | Sort-Object -Unique",
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
+                result = subprocess.run(["powershell", "-NoProfile", "-Command",
+                    "Get-PnpDevice -Class Ports -ErrorAction SilentlyContinue | ForEach-Object { "
+                    "if ($_.FriendlyName -match '\\((COM[0-9]+)\\)') { $Matches[1] } } | Sort-Object -Unique"],
+                    check=False, capture_output=True, text=True, timeout=5)
                 ports = [line.strip() for line in result.stdout.splitlines() if line.strip()]
             except (OSError, subprocess.SubprocessError):
                 pass
         self.port_box["values"] = ports
-        if ports and not self.port_var.get():
-            self.port_var.set(ports[0])
-        if not pyserial_available:
-            self.status_var.set(
-                "已尝试列出Windows串口，但发送功能需要pyserial；"
-                "请运行 tools\\install_python_requirements.bat。"
-            )
+        if ports and not self.port_var.get(): self.port_var.set(ports[0])
+        if not available:
+            self.status_var.set("串口发送需要pyserial；请运行install_python_requirements.bat。")
         elif not ports:
-            self.status_var.set("没有发现串口；也可以在串口框中直接输入COM号。")
-        elif port_source == "pnp":
-            self.status_var.set(
-                "这些COM号来自Windows设备列表，可能包含已断开的端口；"
-                "请选择板载调试器端口，或直接输入COM号。"
-            )
+            self.status_var.set("没有发现串口；也可以直接输入COM号。")
+        elif source == "pnp":
+            self.status_var.set("这些COM号来自Windows设备列表；请选择板载调试器端口。")
+
+    def _derive_curve_from_legacy_table(self, preset: dict) -> list[float]:
+        samples: list[tuple[float, float]] = []
+        for note, anchor in zip(ANCHOR_MIDI_NOTES, preset["anchors"]):
+            for harmonic, decay_ms in enumerate(anchor["decay_ms"], 1):
+                if float(decay_ms) > 0:
+                    samples.append((midi_frequency(note) * harmonic, float(decay_ms)))
+        result = []
+        for target in DECAY_FREQUENCIES_HZ:
+            nearest = sorted(samples, key=lambda item: abs(math.log(item[0] / target)))[:6]
+            weights = [1.0 / (0.04 + abs(math.log(frequency / target))) for frequency, _value in nearest]
+            mean = sum(weight * math.log(max(value, MIN_DECAY_MS))
+                       for weight, (_frequency, value) in zip(weights, nearest)) / sum(weights)
+            result.append(max(MIN_DECAY_MS, min(MAX_DECAY_MS, math.exp(mean))))
+        return result
+
+    def _curve_from_preset(self, preset: dict) -> list[float]:
+        curve = preset.get("decay_curve")
+        if isinstance(curve, dict):
+            xs = [float(value) for value in curve.get("frequencies_hz", [])]
+            ys = [float(value) for value in curve.get("time_constants_ms", [])]
+            if len(xs) >= 2 and len(xs) == len(ys) and all(value > 0 for value in xs + ys):
+                pairs = sorted(zip(xs, ys)); xs, ys = [x for x, _y in pairs], [y for _x, y in pairs]
+                return [max(MIN_DECAY_MS, min(MAX_DECAY_MS, log_interpolate(xs, ys, target)))
+                        for target in DECAY_FREQUENCIES_HZ]
+        return self._derive_curve_from_legacy_table(preset)
+
+    def _expanded_decay_table(self) -> list[list[float]]:
+        xs, ys = list(DECAY_FREQUENCIES_HZ), self.decay_curve_values
+        return [[round(log_interpolate(xs, ys, midi_frequency(note) * harmonic), 3)
+                 for harmonic in range(1, 17)] for note in ANCHOR_MIDI_NOTES]
 
     def _load_into_widgets(self, preset: dict) -> None:
         self.preset = deepcopy(preset)
-        for key, variable in self.adsr_vars.items():
-            variable.set(str(preset["adsr"][key]))
-        for anchor_index, anchor in enumerate(preset["anchors"]):
-            for harmonic in range(16):
-                self.amp_vars[anchor_index][harmonic].set(f"{float(anchor['amplitudes'][harmonic]):.5f}")
-                self.decay_vars[anchor_index][harmonic].set(str(anchor["decay_ms"][harmonic]))
-        self._schedule_preview()
+        for key, variable in self.adsr_vars.items(): variable.set(str(preset["adsr"][key]))
+        for anchor, data in enumerate(preset["anchors"]):
+            self.amp_values[anchor] = [float(value) for value in data["amplitudes"]]
+            self.bar_canvases[anchor].set_values(self.amp_values[anchor])
+        self.decay_curve_values = self._curve_from_preset(preset)
+        self.decay_canvas.set_values(self.decay_curve_values)
+        self._decay_changed(0, self.decay_curve_values[0])
+        self._sync_selected_amplitude(); self._schedule_preview()
 
     def _collect(self) -> dict:
-        preset = deepcopy(self.preset)
+        preset = deepcopy(self.preset); preset["format"] = "gowin-additive-tone-v2"
         preset["adsr"] = {key: float(variable.get()) for key, variable in self.adsr_vars.items()}
-        for anchor_index, anchor in enumerate(preset["anchors"]):
-            anchor["amplitudes"] = [float(value.get()) for value in self.amp_vars[anchor_index]]
-            anchor["decay_ms"] = [float(value.get()) for value in self.decay_vars[anchor_index]]
-        # preset_packets performs the complete range and shape validation.
+        table = self._expanded_decay_table()
+        for anchor, data in enumerate(preset["anchors"]):
+            data["amplitudes"] = [round(value, 6) for value in self.amp_values[anchor]]
+            data["decay_ms"] = table[anchor]
+        preset["decay_curve"] = {"mode": "global-frequency-log-interpolation",
+            "frequencies_hz": list(DECAY_FREQUENCIES_HZ),
+            "time_constants_ms": [round(value, 3) for value in self.decay_curve_values]}
         preset_packets(preset)
         return preset
 
     def _load_file(self) -> None:
         path = filedialog.askopenfilename(filetypes=(("Tone JSON", "*.json"), ("All files", "*.*")))
-        if not path:
-            return
-        try:
-            self._load_into_widgets(load_preset(path))
-            self.status_var.set(f"已载入 {path}")
-        except Exception as error:
-            messagebox.showerror("载入失败", str(error))
+        if path:
+            try:
+                self._load_into_widgets(load_preset(path)); self.status_var.set(f"已载入 {path}")
+            except Exception as error:
+                messagebox.showerror("载入失败", str(error))
 
     def _save_file(self) -> None:
         try:
             preset = self._collect()
         except Exception as error:
-            messagebox.showerror("参数错误", str(error))
-            return
+            messagebox.showerror("参数错误", str(error)); return
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=(("Tone JSON", "*.json"),))
         if path:
             Path(path).write_text(json.dumps(preset, ensure_ascii=False, indent=2), encoding="utf-8")
-            self.status_var.set(f"已保存 {path}")
+            self.preset = preset; self.status_var.set(f"已保存 {path}")
 
     def _send_all(self) -> None:
         port = self.port_var.get().strip()
         if not port:
-            messagebox.showerror("没有串口", "请选择板载调试器对应的COM口。")
-            return
+            messagebox.showerror("没有串口", "请选择板载调试器对应的COM口。"); return
         try:
-            preset = self._collect()
-            packets = preset_packets(preset)
-            count = send_packets(port, packets)
-            self.preset = preset
+            preset = self._collect(); count = send_packets(port, preset_packets(preset)); self.preset = preset
             self.status_var.set(f"已向 {port} 发送 {count}包。请重新按下琴键试听新音色。")
         except Exception as error:
-            messagebox.showerror(
-                "发送失败",
-                f"{error}\n\n请关闭占用同一COM口的串口助手后重试。",
-            )
+            messagebox.showerror("发送失败", f"{error}\n\n请关闭占用同一COM口的串口助手后重试。")
 
 
 if __name__ == "__main__":

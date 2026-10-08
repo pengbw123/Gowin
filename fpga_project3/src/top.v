@@ -18,6 +18,30 @@ module top (
     wire clk_usb_48m;
     wire clk_usb_bram_96m;
     wire usb_pll_lock;
+    wire usb_debug_reset_n;
+    wire usb_debug_cpu_fetch;
+    wire usb_debug_uart_write;
+    wire [31:0] usb_debug_cpu_addr;
+
+    reg        usb_pll_lock_meta = 1'b0;
+    reg        usb_pll_lock_sync = 1'b0;
+    reg        usb_pll_lock_prev = 1'b0;
+    reg [31:0] usb_pll_unlock_count = 32'd0;
+
+    // The firmware emits a UART heartbeat every second.  If no UART write is
+    // observed for three seconds, reset both the USB soft core and the audio
+    // mailbox for 100 ms. This recovers a genuinely stuck CPU/USB transaction
+    // without relying on unplugging the keyboard or reconfiguring the FPGA.
+    localparam [27:0] USB_ALIVE_TIMEOUT_CYCLES = 28'd150_000_000;
+    localparam [22:0] USB_RESET_HOLD_CYCLES = 23'd5_000_000;
+    reg [1:0]  usb_uart_activity_sync = 2'b00;
+    reg [27:0] usb_alive_timeout_count = 28'd0;
+    reg [22:0] usb_reset_hold_count = 23'd0;
+    reg        usb_watchdog_reset = 1'b0;
+
+    wire audio_reset_n = ~(key_s2 | usb_watchdog_reset);
+    wire usb_reset = key_s2 | ~usb_pll_lock | usb_watchdog_reset;
+
     usb_pll u_usb_pll (
         .clkin(clk),
         .clkout0(clk_usb_48m),
@@ -25,16 +49,9 @@ module top (
         .lock(usb_pll_lock)
     );
 
-    wire audio_reset_n = ~key_s2;
-    wire usb_reset = key_s2 | ~usb_pll_lock;
-
     // Persistent diagnostic counter in the board's 50 MHz clock domain.
     // Unlike the USB host it is not reset when the USB PLL loses lock, so a
     // firmware restart can report whether a PLL/reset event caused it.
-    reg        usb_pll_lock_meta = 1'b0;
-    reg        usb_pll_lock_sync = 1'b0;
-    reg        usb_pll_lock_prev = 1'b0;
-    reg [31:0] usb_pll_unlock_count = 32'd0;
     always @(posedge clk) begin
         usb_pll_lock_meta <= usb_pll_lock;
         usb_pll_lock_sync <= usb_pll_lock_meta;
@@ -43,6 +60,33 @@ module top (
             usb_pll_unlock_count <= 32'd0;
         else if (usb_pll_lock_prev && !usb_pll_lock_sync)
             usb_pll_unlock_count <= usb_pll_unlock_count + 1'b1;
+    end
+
+    always @(posedge clk) begin
+        usb_uart_activity_sync <= {usb_uart_activity_sync[0],
+                                   usb_debug_uart_write};
+        if (key_s2 || !usb_pll_lock_sync) begin
+            usb_alive_timeout_count <= 28'd0;
+            usb_reset_hold_count <= 23'd0;
+            usb_watchdog_reset <= 1'b0;
+        end else if (usb_watchdog_reset) begin
+            if (usb_reset_hold_count == USB_RESET_HOLD_CYCLES - 1'b1) begin
+                usb_reset_hold_count <= 23'd0;
+                usb_alive_timeout_count <= 28'd0;
+                usb_watchdog_reset <= 1'b0;
+            end else begin
+                usb_reset_hold_count <= usb_reset_hold_count + 1'b1;
+            end
+        end else if (usb_uart_activity_sync[1]) begin
+            usb_alive_timeout_count <= 28'd0;
+        end else if (usb_alive_timeout_count ==
+                     USB_ALIVE_TIMEOUT_CYCLES - 1'b1) begin
+            usb_alive_timeout_count <= 28'd0;
+            usb_reset_hold_count <= 23'd0;
+            usb_watchdog_reset <= 1'b1;
+        end else begin
+            usb_alive_timeout_count <= usb_alive_timeout_count + 1'b1;
+        end
     end
 
     wire [31:0] usb_midi_event_data;
@@ -62,7 +106,11 @@ module top (
         .midi_event_toggle(usb_midi_event_toggle),
         .midi_event_ack_toggle(midi_event_ack_toggle),
         .midi_connected(usb_midi_connected),
-        .debug_pll_unlock_count(usb_pll_unlock_count)
+        .debug_pll_unlock_count(usb_pll_unlock_count),
+        .debug_reset_n(usb_debug_reset_n),
+        .debug_cpu_fetch(usb_debug_cpu_fetch),
+        .debug_uart_write(usb_debug_uart_write),
+        .debug_cpu_addr(usb_debug_cpu_addr)
     );
 
     // Safe multi-clock mailbox receive. Event data stays unchanged from the
@@ -223,5 +271,8 @@ module top (
     wire [3:0] unused_active_voice_count = active_voice_count;
     wire unused_uart_packet_received = uart_packet_received;
     wire unused_uart_packet_error = uart_packet_error;
+    wire unused_usb_debug_reset_n = usb_debug_reset_n;
+    wire unused_usb_debug_cpu_fetch = usb_debug_cpu_fetch;
+    wire [31:0] unused_usb_debug_cpu_addr = usb_debug_cpu_addr;
 
 endmodule

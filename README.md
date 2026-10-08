@@ -61,15 +61,17 @@ cd fpga_project3\tools
 .\run_harmonic_editor.bat
 ```
 
-编辑器可以修改C2/C3/C4/C6四组基准的16次谐波幅度、各谐波衰减时间和ADSR参数，并通过UART实时发送到FPGA。
+编辑器用四组可拖动柱状图修改C2/C3/C4/C6的16次谐波幅度，用一条9点频率曲线控制各谐波衰减，并可修改ADSR后通过UART实时发送到FPGA。频率曲线在发送时自动展开为原有4×16项衰减参数。
+上电默认载入`pianotone2.json`，其四组谐波已做安全归一化，避免高增益音色与长混响叠加后持续削顶。
 
 ## 当前验证状态
 
 - USB-MIDI键盘枚举、按键、力度和总音量已完成实板验证；
 - 加法合成、四基准插值和UART编辑链路已完成RTL与实板验证；
 - Pitch Bend、Vibrato、Portamento和三种数字效果已通过完整综合、布局布线与时序分析，等待进一步实板听感调校；
-- 最终资源：Logic 52%、Register 22%、BSRAM 84%、DSP 90%；
-- 50 MHz音频域Fmax为50.296 MHz，Setup/Hold违例为0，TNS为0。
+- 长混响保留上一版强度；效果器反馈运算已修正为32位中间结果，USB端点、MIDI邮箱、软核和合成状态机均已加入自恢复；
+- 最终资源：Logic 59%、Register 23%、BSRAM 84%、DSP 88%；
+- 50 MHz音频域Fmax为50.904 MHz，Setup/Hold违例为0，TNS为0。
 
 详细MIDI映射、DSP原理、引脚表和测试步骤见[工程说明](fpga_project3/README.md)。
 

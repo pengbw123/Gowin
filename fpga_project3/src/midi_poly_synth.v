@@ -129,7 +129,7 @@ module midi_poly_synth #(
     reg                 voice_gate [0:VOICE_COUNT-1];
     reg                 voice_key_down [0:VOICE_COUNT-1];
     reg [6:0]           voice_note [0:VOICE_COUNT-1];
-    reg [6:0]           voice_velocity [0:VOICE_COUNT-1];
+    reg [15:0]          voice_velocity_gain [0:VOICE_COUNT-1];
     reg [31:0]          voice_phase [0:VOICE_COUNT-1];
     reg [31:0]          voice_phase_increment [0:VOICE_COUNT-1];
     reg [31:0]          voice_current_increment [0:VOICE_COUNT-1];
@@ -152,6 +152,7 @@ module midi_poly_synth #(
     assign midi_event_ready = ~event_pending;
 
     reg [4:0] engine_state;
+    reg [15:0] engine_watchdog;
     reg [2:0] voice_index;
     reg [3:0] harmonic_index;
     reg [3:0] init_harmonic_index;
@@ -191,7 +192,7 @@ module midi_poly_synth #(
 
     reg signed [48:0] envelope_product_reg;
     wire signed [32:0] envelope_scaled = envelope_product_reg >>> 16;
-    wire [15:0] velocity_gain_q15 = voice_velocity[voice_index] * 9'd258;
+    reg [15:0] render_velocity_gain;
     reg signed [49:0] velocity_product_reg;
     wire signed [34:0] voice_sample_scaled = velocity_product_reg >>> 15;
     wire signed [38:0] mix_with_voice =
@@ -489,6 +490,7 @@ module midi_poly_synth #(
             pending_event       <= 32'd0;
             event_pending       <= 1'b0;
             engine_state        <= ENGINE_IDLE;
+            engine_watchdog     <= 16'd0;
             voice_index         <= 3'd0;
             harmonic_index      <= 4'd0;
             init_harmonic_index <= 4'd0;
@@ -513,6 +515,7 @@ module midi_poly_synth #(
             envelope_product_reg <= 49'sd0;
             velocity_product_reg <= 50'sd0;
             render_envelope_level <= 16'd0;
+            render_velocity_gain <= 16'd0;
             envelope_curve_reg <= 16'd0;
             envelope_start_reg <= 16'd0;
             envelope_state_reg <= ENV_IDLE;
@@ -543,7 +546,7 @@ module midi_poly_synth #(
                 voice_gate[i]            <= 1'b0;
                 voice_key_down[i]        <= 1'b0;
                 voice_note[i]            <= 7'd0;
-                voice_velocity[i]        <= 7'd0;
+                voice_velocity_gain[i]   <= 16'd0;
                 voice_phase[i]           <= 32'd0;
                 voice_phase_increment[i] <= 32'd0;
                 voice_current_increment[i] <= 32'd0;
@@ -558,6 +561,15 @@ module midi_poly_synth #(
         end else begin
             partial_level_read <= partial_level[partial_ram_address];
             partial_decay_read <= partial_decay[partial_ram_address];
+
+            // A complete worst-case 8-voice render takes well below 1000
+            // clocks.  If the engine fails to revisit IDLE for about 1.3 ms,
+            // recover locally instead of leaving the MIDI mailbox and USB
+            // firmware blocked until the FPGA is reconfigured.
+            if (engine_state == ENGINE_IDLE)
+                engine_watchdog <= 16'd0;
+            else if (engine_watchdog != 16'hffff)
+                engine_watchdog <= engine_watchdog + 1'b1;
 
             if (sample_tick) begin
                 sample_pending <= 1'b1;
@@ -668,7 +680,12 @@ module midi_poly_synth #(
                     voice_gate[allocation_index]            <= 1'b1;
                     voice_key_down[allocation_index]        <= 1'b1;
                     voice_note[allocation_index]            <= allocation_note;
-                    voice_velocity[allocation_index]        <= allocation_velocity;
+                    // velocity/127 in Q1.15. Precompute it once at Note On;
+                    // the old dynamic array read feeding a multiplier was the
+                    // 50 MHz domain's critical path with almost no margin.
+                    voice_velocity_gain[allocation_index] <=
+                        {1'b0, allocation_velocity, 8'd0} +
+                        {8'd0, allocation_velocity, 1'b0};
                     voice_phase_increment[allocation_index] <= allocation_target_increment;
                     last_voice_index <= allocation_index;
                     if (allocation_legato) begin
@@ -765,6 +782,7 @@ module midi_poly_synth #(
                         if (envelope_level[voice_index] > 16'd1024)
                             audible_voice_count <= audible_voice_count + 1'b1;
                         render_envelope_level <= envelope_level[voice_index];
+                        render_velocity_gain <= voice_velocity_gain[voice_index];
                         envelope_curve_reg <= selected_curve;
                         envelope_start_reg <= envelope_start[voice_index];
                         envelope_state_reg <= envelope_state[voice_index];
@@ -910,7 +928,7 @@ module midi_poly_synth #(
 
                 ENGINE_VELOCITY_MULT: begin
                     velocity_product_reg <= envelope_scaled *
-                        $signed({1'b0, velocity_gain_q15});
+                        $signed({1'b0, render_velocity_gain});
                     engine_state <= ENGINE_VOICE_ACCUM;
                 end
 
@@ -929,6 +947,23 @@ module midi_poly_synth #(
 
                 default: engine_state <= ENGINE_IDLE;
             endcase
+
+            if (engine_watchdog == 16'hfffe) begin
+                engine_state       <= ENGINE_IDLE;
+                engine_watchdog    <= 16'd0;
+                sample_pending     <= 1'b0;
+                event_pending      <= 1'b0;
+                sample_out         <= 16'sd0;
+                active_voice_count <= 4'd0;
+                sustain_pedal      <= 1'b0;
+                for (i = 0; i < VOICE_COUNT; i = i + 1) begin
+                    voice_active[i]   <= 1'b0;
+                    voice_gate[i]     <= 1'b0;
+                    voice_key_down[i] <= 1'b0;
+                    envelope_state[i] <= ENV_IDLE;
+                    envelope_level[i] <= 16'd0;
+                end
+            end
         end
     end
 

@@ -72,9 +72,6 @@ module audio_effects (
     reg allpass_pipeline_valid;
 
     reg signed [31:0] comb_sum;
-    wire signed [31:0] allpass_output_value =
-        $signed(allpass_tap) - ($signed(allpass_input_delayed) >>> 1);
-
     function signed [15:0] saturate16;
         input signed [31:0] value;
         begin
@@ -87,9 +84,22 @@ module audio_effects (
         end
     endfunction
 
+    // Verilog addition normally keeps the width of its operands.  Extending
+    // before every feedback/mix addition is essential: otherwise two 16-bit
+    // samples can wrap at bit 15 before saturate16 ever sees the result.
+    function signed [31:0] extend16;
+        input signed [15:0] value;
+        begin
+            extend16 = {{16{value[15]}}, value};
+        end
+    endfunction
+
+    wire signed [31:0] allpass_output_value =
+        extend16(allpass_tap) - (extend16(allpass_input_delayed) >>> 1);
+
     // Four audible wet/dry ranges are enough for a physical 0..127 knob and
     // avoid consuming three extra DSP multipliers.  A literal zero is a true
-    // bypass; the highest range remains 50% wet so the dry attack is retained.
+    // bypass; chorus/delay keep the conservative 12.5/25/37.5/50% law.
     function signed [15:0] blend_effect;
         input signed [15:0] dry_value;
         input signed [15:0] wet_value;
@@ -97,20 +107,52 @@ module audio_effects (
         reg signed [31:0] difference;
         reg signed [31:0] mixed;
         begin
-            difference = $signed(wet_value) - $signed(dry_value);
+            difference = extend16(wet_value) - extend16(dry_value);
             if (amount == 0)
-                mixed = dry_value;
+                mixed = extend16(dry_value);
             else begin
                 case (amount[6:5])
-                    2'b00: mixed = $signed(dry_value) + (difference >>> 3);
-                    2'b01: mixed = $signed(dry_value) + (difference >>> 2);
-                    2'b10: mixed = $signed(dry_value) +
+                    2'b00: mixed = extend16(dry_value) + (difference >>> 3);
+                    2'b01: mixed = extend16(dry_value) + (difference >>> 2);
+                    2'b10: mixed = extend16(dry_value) +
                                       (difference >>> 2) + (difference >>> 3);
-                    default: mixed = ($signed(dry_value) +
-                                      $signed(wet_value)) >>> 1;
+                    default: mixed = (extend16(dry_value) +
+                                      extend16(wet_value)) >>> 1;
                 endcase
             end
             blend_effect = saturate16(mixed);
+        end
+    endfunction
+
+    // Reverb deliberately has a stronger demonstration curve.  Its four wet
+    // ranges are 12.5/37.5/62.5/75%, so the top half of the SWING knob makes
+    // the room tail unmistakable without removing the dry attack completely.
+    function signed [15:0] blend_reverb;
+        input signed [15:0] dry_value;
+        input signed [15:0] wet_value;
+        input [6:0] amount;
+        reg signed [31:0] difference;
+        reg signed [31:0] mixed;
+        begin
+            difference = extend16(wet_value) - extend16(dry_value);
+            if (amount == 0)
+                mixed = extend16(dry_value);
+            else begin
+                case (amount[6:5])
+                    2'b00: mixed = extend16(dry_value) +
+                                      (difference >>> 3);                    // 12.5%
+                    2'b01: mixed = extend16(dry_value) +
+                                      (difference >>> 2) +
+                                      (difference >>> 3);                    // 37.5%
+                    2'b10: mixed = extend16(dry_value) +
+                                      (difference >>> 1) +
+                                      (difference >>> 3);                    // 62.5%
+                    default: mixed = extend16(dry_value) +
+                                      (difference >>> 1) +
+                                      (difference >>> 2);                    // 75%
+                endcase
+            end
+            blend_reverb = saturate16(mixed);
         end
     endfunction
 
@@ -166,7 +208,7 @@ module audio_effects (
             // DELAY: write input plus half of the old echo back into the ring
             // buffer.  That feedback creates successively quieter repeats.
             delay_memory[delay_write_pointer] <= saturate16(
-                $signed(chorus_stage) + ($signed(delay_wet) >>> 1));
+                extend16(chorus_stage) + (extend16(delay_wet) >>> 1));
             delay_tap <= delay_memory[delay_read_pointer];
             delay_stage <= blend_effect(chorus_stage, delay_wet, delay_mix);
             delay_write_pointer <= delay_write_pointer + 1'b1;
@@ -180,17 +222,23 @@ module audio_effects (
             // by one sample so each old cell value is fed back into that same
             // cell rather than accidentally into its neighbour.
             if (comb_pipeline_valid) begin
+                // Restore the intentionally obvious demo reverb: 1/2 input
+                // injection and 3/4 feedback.  Unlike the earlier revision,
+                // every operand is widened before addition, so large internal
+                // values saturate deterministically instead of wrapping in 16
+                // bits and feeding an unrelated sign back into the delay RAM.
                 reverb_comb1[comb1_write_pointer] <= saturate16(
-                    $signed(reverb_input_delayed) +
-                    ($signed(comb1_wet) >>> 1));
+                    (extend16(reverb_input_delayed) >>> 1) +
+                    (extend16(comb1_wet) >>> 1) +
+                    (extend16(comb1_wet) >>> 2));
                 reverb_comb2[comb2_write_pointer] <= saturate16(
-                    $signed(reverb_input_delayed) +
-                    ($signed(comb2_wet) >>> 1) -
-                    ($signed(comb2_wet) >>> 4));
+                    (extend16(reverb_input_delayed) >>> 1) +
+                    (extend16(comb2_wet) >>> 1) +
+                    (extend16(comb2_wet) >>> 2));
                 reverb_comb3[comb3_write_pointer] <= saturate16(
-                    $signed(reverb_input_delayed) +
-                    ($signed(comb3_wet) >>> 2) +
-                    ($signed(comb3_wet) >>> 3));
+                    (extend16(reverb_input_delayed) >>> 1) +
+                    (extend16(comb3_wet) >>> 1) +
+                    (extend16(comb3_wet) >>> 2));
             end
             comb1_tap <= reverb_comb1[comb1_pointer];
             comb2_tap <= reverb_comb2[comb2_pointer];
@@ -201,19 +249,19 @@ module audio_effects (
             reverb_input_delayed <= delay_stage;
             comb_pipeline_valid <= 1'b1;
 
-            comb_sum <= ($signed(comb1_wet) + $signed(comb2_wet) +
-                         $signed(comb3_wet)) >>> 2;
+            comb_sum <= (extend16(comb1_wet) + extend16(comb2_wet) +
+                         extend16(comb3_wet)) >>> 1;
             allpass_tap <= reverb_allpass[allpass_pointer];
             allpass_write_pointer <= allpass_pointer;
             allpass_input_delayed <= saturate16(comb_sum);
             if (allpass_pipeline_valid) begin
                 reverb_allpass[allpass_write_pointer] <= saturate16(
-                    $signed(allpass_input_delayed) +
+                    extend16(allpass_input_delayed) +
                     (allpass_output_value >>> 1));
                 reverb_stage <= saturate16(allpass_output_value);
             end
             allpass_pipeline_valid <= 1'b1;
-            sample_out <= blend_effect(delay_stage, reverb_stage, reverb_mix);
+            sample_out <= blend_reverb(delay_stage, reverb_stage, reverb_mix);
 
             if (comb1_pointer == 11'd1498)
                 comb1_pointer <= 11'd0;

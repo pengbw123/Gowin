@@ -22,6 +22,7 @@ struct midi_driver_data {
     uint8_t endpoint;
     uint8_t toggle;
     uint8_t max_packet;
+    uint8_t error_streak;
     uint8_t packet[MIDI_PACKET_CAPACITY];
 };
 
@@ -37,12 +38,24 @@ void midi_set_connected(uint8_t connected)
 static void emit_midi_event(uint8_t header, uint8_t status,
                             uint8_t data1, uint8_t data2)
 {
+    uint32_t wait_started;
     uint32_t event = ((uint32_t)header << 24) |
                      ((uint32_t)status << 16) |
                      ((uint32_t)data1 << 8) |
                      (uint32_t)data2;
 
-    while ((midi_output[REG_MIDI_STATUS] & MIDI_READY) == 0u) { }
+    // Never let one lost cross-clock acknowledge freeze the entire USB host.
+    // The old unbounded wait stopped enumeration, heartbeat and disconnect
+    // handling forever if the audio side ever became unavailable.  A healthy
+    // synthesizer accepts an event in microseconds; 20 ms is deliberately
+    // generous and dropping one event is safer than deadlocking the device.
+    wait_started = now_ms();
+    while ((midi_output[REG_MIDI_STATUS] & MIDI_READY) == 0u) {
+        if ((uint32_t)(now_ms() - wait_started) >= 20u) {
+            printf("MIDI mailbox timeout, event dropped\n");
+            return;
+        }
+    }
     midi_output[REG_MIDI_EVENT] = event;
 
     if (((status & 0xf0u) == 0x90u) && (data2 != 0u))
@@ -122,13 +135,13 @@ void drv_midi(TASK *task, uint8_t *configuration)
 
     case midi_poll_wait:
         if (task->req->resp == PID_STALL) {
-            printf("USB-MIDI endpoint stalled\n");
-            midi_set_connected(0);
-            task->state = midi_idle;
+            printf("USB-MIDI endpoint stalled; re-enumerating\n");
+            restart_root_task(task);
             return;
         }
 
         if (task->req->resp == REQ_OK) {
+            midi_data.error_streak = 0;
             midi_data.toggle = task->req->toggle;
             for (index = 0; (index + 3u) < task->req->size; index += 4u) {
                 uint8_t header = midi_data.packet[index];
@@ -138,6 +151,19 @@ void drv_midi(TASK *task, uint8_t *configuration)
                                     midi_data.packet[index + 2u],
                                     midi_data.packet[index + 3u]);
                 }
+            }
+        } else if (task->req->resp == REQ_EMPTY) {
+            // NAK is the normal idle response of a USB-MIDI bulk endpoint.
+            midi_data.error_streak = 0;
+        } else {
+            // CRC, timeout and unexpected PID errors are transient in small
+            // numbers.  A sustained run means this endpoint is no longer in a
+            // usable state; restart the root port instead of polling forever.
+            midi_data.error_streak++;
+            if (midi_data.error_streak >= 16u) {
+                printf("USB-MIDI repeated errors; re-enumerating\n");
+                restart_root_task(task);
+                return;
             }
         }
         task->when = now_ms() + 1u;

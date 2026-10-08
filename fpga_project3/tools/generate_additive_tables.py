@@ -37,7 +37,7 @@ def main() -> None:
     parser.add_argument(
         "--preset",
         type=Path,
-        default=Path(__file__).with_name("additive_piano_4anchor.json"),
+        default=Path(__file__).with_name("pianotone2.json"),
     )
     parser.add_argument(
         "--output",

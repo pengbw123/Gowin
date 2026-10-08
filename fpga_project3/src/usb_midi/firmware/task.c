@@ -67,6 +67,17 @@ TASK *clr_task(TASK *task)
     return task;
 }
 
+// Return the one-device root port to the same recoverable state used after a
+// physical disconnect.  Class drivers call this after a persistent endpoint
+// fault instead of entering an idle state that can never produce MIDI again.
+void restart_root_task(TASK *task)
+{
+    midi_set_connected(0);
+    clr_task(task);
+    root_config(SPEED_FS, 0);
+    task->prt_flags = ROOT_PORT | PRT_POWER;
+}
+
 uint8_t donotspam = 0;
 
 // Manage root port connection status
@@ -83,10 +94,7 @@ static void check_root(TASK *task)
             donotspam = 1;
         }
 
-        midi_set_connected(0);
-        clr_task(task);
-        root_config(1, 0);
-        task->prt_flags = ROOT_PORT|PRT_POWER;
+        restart_root_task(task);
         return;
     }
 

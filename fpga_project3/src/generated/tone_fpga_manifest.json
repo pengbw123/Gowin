@@ -1,0 +1,22 @@
+{
+  "format": "gowin-fpga-tone-export-v2",
+  "tone_name": "钢琴（合成）",
+  "sample_rate_hz": 48828.125,
+  "wavetable_points": 2048,
+  "wavetable_format": "signed-q1.15-two-complement-hex",
+  "envelope_logic": "gate-driven-attack-decay-sustain-release",
+  "curve_lut_format": "unsigned-q0.16-hex-256-points",
+  "filter_coefficient_format": "unsigned-q0.16-hex",
+  "files": {
+    "wavetable": "tone_wavetable.mem",
+    "filter_alpha_lut": "filter_alpha_lut.mem",
+    "params": "tone_params.vh",
+    "manifest": "tone_fpga_manifest.json",
+    "amp_attack_curve": "tone_amp_attack_curve.mem",
+    "amp_decay_curve": "tone_amp_decay_curve.mem",
+    "amp_release_curve": "tone_amp_release_curve.mem",
+    "filter_attack_curve": "tone_filter_attack_curve.mem",
+    "filter_decay_curve": "tone_filter_decay_curve.mem",
+    "filter_release_curve": "tone_filter_release_curve.mem"
+  }
+}

@@ -4,6 +4,7 @@
 *.fs
 *.bin
 *.binx
+*.elf
 *.db
 *.vg
 *.log
@@ -28,3 +29,17 @@ Thumbs.db
 *.zip
 *.tmp
 *~
+
+# Local diagnostic and obsolete copied files are not part of the release
+**/diagnostics/
+**/build_cpu_diag.tcl
+**/src/adsr_envelope.v
+**/src/button_debounce.v
+**/src/dynamic_iir_lpf.v
+**/src/note_synth.v
+**/src/unison_oscillator.v
+**/src/generated/filter_alpha_lut.mem
+**/src/generated/tone_filter_*_curve.mem
+**/src/generated/tone_wavetable.mem
+**/tools/pianotone*.json
+**/tools/tone3.json

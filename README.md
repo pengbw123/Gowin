@@ -61,8 +61,19 @@ cd fpga_project3\tools
 .\run_harmonic_editor.bat
 ```
 
-编辑器用四组可拖动柱状图修改C2/C3/C4/C6的16次谐波幅度，用一条9点频率曲线控制各谐波衰减，并可修改ADSR后通过UART实时发送到FPGA。频率曲线在发送时自动展开为原有4×16项衰减参数。
+编辑器用四组可拖动柱状图修改C2/C3/C4/C6的16次谐波幅度，并直接显示和编辑四基准各自的16项相对衰减时间；64项衰减参数不再经过全局频率曲线近似，可与ADSR一起通过UART实时发送到FPGA。
 上电默认载入`pianotone2.json`，其四组谐波已做安全归一化，避免高增益音色与长混响叠加后持续削顶。
+
+### 4. 分析真实乐器录音
+
+```powershell
+cd fpga_project3\tools
+.\run_instrument_analyzer.bat
+```
+
+频谱分析器读取WAV/AIFF/FLAC单音录音，以可独立全屏的高对比热力图显示STFT频谱；纵轴可自动缩放到前32次谐波，鼠标悬停任意频点会在热力图上方浮动显示该频率的时间—幅度曲线。工具还能以自动增益播放原始选段并动画联动时间线和32谐波柱状图，同时提供谐波峰值表、衰减拟合以及JSON/CSV导出。首次使用仍执行同一个`install_python_requirements.bat`安装依赖。
+
+阶段二程序`fpga_project3/tools/run_timbre_builder.bat`同时处理C2/C3/C4/C6四个真实单音，把绝对谐波幅度分解为总能量包络与相对音色变化，避免与FPGA全局ADSR重复衰减；可A/B试听原声、16谐波和32谐波重建，并导出相对衰减Q0.24参数。工具目录的用途索引见`fpga_project3/tools/README.md`。
 
 ## 当前验证状态
 

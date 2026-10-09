@@ -1,9 +1,4 @@
-"""Interactive editor for the four-anchor additive synthesizer.
-
-The UI exposes four draggable 16-bin spectra and one global frequency/decay
-curve.  Before save/send the curve is sampled at every anchor partial and
-expanded into the FPGA's existing 4 x 16 table, so the UART/RTL stay compatible.
-"""
+"""Four-anchor editor with independent amplitude and decay per partial."""
 
 from __future__ import annotations
 
@@ -22,28 +17,7 @@ from additive_uart_protocol import (
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_PRESET = HERE / "pianotone2.json"
-DECAY_FREQUENCIES_HZ = (65.4, 130.8, 261.6, 523.3, 1046.5, 2093.0, 4186.0, 8372.0, 16000.0)
-MIN_DECAY_MS, MAX_DECAY_MS = 100.0, 20000.0
-
-
-def midi_frequency(note: int) -> float:
-    return 440.0 * 2.0 ** ((note - 69) / 12.0)
-
-
-def log_interpolate(xs: list[float], ys: list[float], x: float) -> float:
-    """Interpolate positive values in log-frequency/log-time space."""
-    lx = math.log(max(x, 1.0))
-    lxs = [math.log(max(value, 1.0)) for value in xs]
-    lys = [math.log(max(value, MIN_DECAY_MS)) for value in ys]
-    if lx <= lxs[0]:
-        return math.exp(lys[0])
-    if lx >= lxs[-1]:
-        return math.exp(lys[-1])
-    for index in range(len(lxs) - 1):
-        if lxs[index] <= lx <= lxs[index + 1]:
-            fraction = (lx - lxs[index]) / (lxs[index + 1] - lxs[index])
-            return math.exp(lys[index] + fraction * (lys[index + 1] - lys[index]))
-    return math.exp(lys[-1])
+MIN_DECAY_MS, MAX_DECAY_MS = 50.0, 120000.0
 
 
 class HarmonicBarCanvas(tk.Canvas):
@@ -100,81 +74,79 @@ class HarmonicBarCanvas(tk.Canvas):
                              fill="#b8c8d8", font=("Segoe UI", 8))
 
 
-class DecayCurveCanvas(tk.Canvas):
-    """Draggable log-frequency/log-time decay curve."""
+class HarmonicDecayCanvas(tk.Canvas):
+    """Draggable 16-bin log-time editor for one anchor's partial decays."""
 
-    def __init__(self, master: tk.Misc, on_change: Callable[[int, float], None]) -> None:
+    def __init__(self, master: tk.Misc, anchor: int,
+                 on_change: Callable[[int, int, float], None],
+                 on_select: Callable[[int, int], None]) -> None:
         super().__init__(master, height=190, background="#120e25",
                          highlightthickness=1, highlightbackground="#493b70",
                          cursor="sb_v_double_arrow")
-        self.on_change = on_change
-        self.values = [4000.0] * len(DECAY_FREQUENCIES_HZ)
-        self.selected, self.dragging = 0, False
+        self.anchor, self.on_change, self.on_select = anchor, on_change, on_select
+        self.values, self.selected = [0.0] * 16, 0
         self.bind("<Configure>", lambda _event: self.redraw())
-        self.bind("<Button-1>", self._mouse_down)
-        self.bind("<B1-Motion>", self._mouse_drag)
-        self.bind("<ButtonRelease-1>", lambda _event: setattr(self, "dragging", False))
+        self.bind("<Button-1>", self._mouse_update)
+        self.bind("<B1-Motion>", self._mouse_update)
 
-    def set_values(self, values: list[float]) -> None:
-        self.values = [max(MIN_DECAY_MS, min(MAX_DECAY_MS, float(value))) for value in values]
+    def set_anchor_values(self, anchor: int, values: list[float],
+                          selected: int = 0) -> None:
+        self.anchor = anchor
+        self.values = [max(0.0, min(MAX_DECAY_MS, float(value))) for value in values]
+        self.selected = max(0, min(15, selected))
         self.redraw()
 
     def _geometry(self) -> tuple[float, float, float, float]:
-        return 58.0, 13.0, max(420.0, self.winfo_width() - 14.0), max(115.0, self.winfo_height() - 30.0)
-
-    def _x(self, frequency: float) -> float:
-        left, _top, right, _bottom = self._geometry()
-        low, high = math.log(DECAY_FREQUENCIES_HZ[0]), math.log(DECAY_FREQUENCIES_HZ[-1])
-        return left + (math.log(frequency) - low) * (right - left) / (high - low)
+        return 62.0, 12.0, max(420.0, self.winfo_width() - 12.0), max(115.0, self.winfo_height() - 29.0)
 
     def _y(self, milliseconds: float) -> float:
         _left, top, _right, bottom = self._geometry()
-        low, high = math.log(MIN_DECAY_MS), math.log(MAX_DECAY_MS)
-        return bottom - (math.log(milliseconds) - low) * (bottom - top) / (high - low)
+        if milliseconds <= 0.0:
+            return bottom
+        value = max(MIN_DECAY_MS, min(MAX_DECAY_MS, milliseconds))
+        fraction = math.log(value / MIN_DECAY_MS) / math.log(MAX_DECAY_MS / MIN_DECAY_MS)
+        return bottom - fraction * (bottom - top)
 
     def _value_at_y(self, y: float) -> float:
         _left, top, _right, bottom = self._geometry()
         fraction = max(0.0, min(1.0, (bottom - y) / max(1.0, bottom - top)))
+        if fraction < 0.018:
+            return 0.0
         return math.exp(math.log(MIN_DECAY_MS) + fraction * math.log(MAX_DECAY_MS / MIN_DECAY_MS))
 
-    def _mouse_down(self, event: tk.Event) -> None:
-        self.selected = min(range(len(DECAY_FREQUENCIES_HZ)),
-                            key=lambda index: abs(event.x - self._x(DECAY_FREQUENCIES_HZ[index])))
-        self.dragging = True
-        self._set_y(event.y)
-
-    def _mouse_drag(self, event: tk.Event) -> None:
-        if self.dragging:
-            self._set_y(event.y)
-
-    def _set_y(self, y: float) -> None:
-        value = self._value_at_y(y)
-        self.values[self.selected] = value
-        self.on_change(self.selected, value)
+    def _mouse_update(self, event: tk.Event) -> None:
+        left, _top, right, _bottom = self._geometry()
+        if not left <= event.x <= right:
+            return
+        harmonic = max(0, min(15, int((event.x - left) / ((right - left) / 16.0))))
+        value = self._value_at_y(event.y)
+        self.selected, self.values[harmonic] = harmonic, value
+        self.on_select(self.anchor, harmonic)
+        self.on_change(self.anchor, harmonic, value)
         self.redraw()
 
     def redraw(self) -> None:
         self.delete("all")
         left, top, right, bottom = self._geometry()
-        for milliseconds in (100, 250, 500, 1000, 2500, 5000, 10000, 20000):
+        for milliseconds in (100, 500, 1000, 5000, 20000, 120000):
             y = self._y(milliseconds)
             self.create_line(left, y, right, y, fill="#2d2548")
             label = f"{milliseconds / 1000:g}s" if milliseconds >= 1000 else f"{milliseconds}ms"
             self.create_text(left - 7, y, text=label, fill="#a79ac4", anchor="e", font=("Segoe UI", 8))
-        points: list[float] = []
-        for frequency, milliseconds in zip(DECAY_FREQUENCIES_HZ, self.values):
-            x, y = self._x(frequency), self._y(milliseconds)
-            self.create_line(x, top, x, bottom, fill="#211a39")
-            label = f"{frequency / 1000:g}k" if frequency >= 1000 else f"{frequency:g}"
-            self.create_text(x, bottom + 11, text=label, fill="#a79ac4", font=("Segoe UI", 8))
-            points.extend((x, y))
-        self.create_line(*points, fill="#b57cff", width=2, smooth=True)
-        for index, (frequency, milliseconds) in enumerate(zip(DECAY_FREQUENCIES_HZ, self.values)):
-            x, y = self._x(frequency), self._y(milliseconds)
-            radius = 6 if index == self.selected else 4
-            self.create_oval(x - radius, y - radius, x + radius, y + radius,
-                             fill="#ffe47a" if index == self.selected else "#b57cff",
-                             outline="#fff5bd")
+        bar_width = (right - left) / 16.0
+        for harmonic, milliseconds in enumerate(self.values):
+            x0 = left + harmonic * bar_width + 3
+            x1 = left + (harmonic + 1) * bar_width - 3
+            y = self._y(milliseconds)
+            selected = harmonic == self.selected
+            self.create_rectangle(
+                x0, y, x1, bottom,
+                fill="#ffe47a" if selected else "#b57cff",
+                outline="#fff5bd" if selected else "#d1a9ff",
+                width=2 if selected else 1,
+            )
+            self.create_text((x0 + x1) / 2, bottom + 11, text=f"{harmonic + 1}×",
+                             fill="#c4b6dc", font=("Segoe UI", 8))
 
 
 class HarmonicEditor(tk.Tk):
@@ -185,11 +157,13 @@ class HarmonicEditor(tk.Tk):
         self.minsize(920, 680)
         self.preset = load_preset(DEFAULT_PRESET)
         self.port_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="拖动柱形与衰减曲线后点击“发送全部”；新按下的琴键使用新参数。")
+        self.status_var = tk.StringVar(value="四基准各自保存16组独立相对衰减；修改后点击“发送全部”。")
         self.scale_factor_var = tk.StringVar(value="1.0")
         self.preview_summary_var = tk.StringVar()
         self.selected_amp_var = tk.StringVar(value="0")
         self.selected_amp_label_var = tk.StringVar(value="1×")
+        self.selected_decay_var = tk.StringVar(value="0")
+        self.selected_decay_label_var = tk.StringVar(value="C2 / 1×")
         self.decay_point_var = tk.StringVar()
         # Keep Python 3.7 compatibility (the bundled Gowin-side Python on some
         # machines is older than the interpreter used during development).
@@ -197,7 +171,7 @@ class HarmonicEditor(tk.Tk):
         self._selected_anchor, self._selected_harmonic = 0, 0
         self.adsr_vars = {name: tk.StringVar() for name in ("attack_ms", "decay_ms", "sustain", "release_ms")}
         self.amp_values = [[0.0] * 16 for _ in range(4)]
-        self.decay_curve_values = [4000.0] * len(DECAY_FREQUENCIES_HZ)
+        self.decay_values = [[0.0] * 16 for _ in range(4)]
         self.bar_canvases: list[HarmonicBarCanvas] = []
         self._build()
         self._load_into_widgets(self.preset)
@@ -245,10 +219,24 @@ class HarmonicEditor(tk.Tk):
         self.wave_canvas.pack(fill="both", expand=True); self.wave_canvas.bind("<Configure>", self._schedule_preview)
         ttk.Label(preview, textvariable=self.preview_summary_var, wraplength=330).pack(fill="x", pady=(3, 0))
 
-        decay = ttk.LabelFrame(self, text="全局频率—谐波衰减曲线（纵轴越高衰减越慢；拖动控制点）", padding=(6, 3))
+        decay = ttk.LabelFrame(
+            self,
+            text="当前基准的16次谐波独立相对衰减（纵轴为时间常数；越高衰减越慢）",
+            padding=(6, 3),
+        )
         decay.pack(fill="x", padx=8, pady=(2, 1))
-        self.decay_canvas = DecayCurveCanvas(decay, self._decay_changed); self.decay_canvas.pack(fill="x")
-        ttk.Label(decay, textvariable=self.decay_point_var).pack(anchor="w", padx=4, pady=(2, 0))
+        self.decay_canvas = HarmonicDecayCanvas(
+            decay, 0, self._decay_changed, self._decay_selected
+        )
+        self.decay_canvas.pack(fill="x")
+        decay_exact = ttk.Frame(decay); decay_exact.pack(fill="x", pady=(2, 0))
+        ttk.Label(decay_exact, text="选中").pack(side="left")
+        ttk.Label(decay_exact, textvariable=self.selected_decay_label_var, width=9).pack(side="left", padx=(3, 8))
+        ttk.Label(decay_exact, text="相对衰减τ/ms（0=保持）").pack(side="left")
+        ttk.Entry(decay_exact, textvariable=self.selected_decay_var, width=12).pack(side="left", padx=3)
+        ttk.Button(decay_exact, text="应用", command=self._apply_exact_decay).pack(side="left")
+        ttk.Button(decay_exact, text="设为保持", command=self._disable_selected_decay).pack(side="left", padx=4)
+        ttk.Label(decay_exact, textvariable=self.decay_point_var).pack(side="left", padx=(12, 0))
         ttk.Label(self, textvariable=self.status_var, padding=(8, 4)).pack(fill="x")
 
     def _current_anchor_index(self) -> int:
@@ -260,16 +248,22 @@ class HarmonicEditor(tk.Tk):
     def _tab_changed(self, *_args) -> None:
         self._selected_anchor = self._current_anchor_index()
         self._selected_harmonic = self.bar_canvases[self._selected_anchor].selected
-        self._sync_selected_amplitude(); self._schedule_preview()
+        self.decay_canvas.set_anchor_values(
+            self._selected_anchor, self.decay_values[self._selected_anchor],
+            self._selected_harmonic,
+        )
+        self._sync_selected_amplitude(); self._sync_selected_decay(); self._schedule_preview()
 
     def _bar_selected(self, anchor: int, harmonic: int) -> None:
         self._selected_anchor, self._selected_harmonic = anchor, harmonic
-        self._sync_selected_amplitude()
+        self.decay_canvas.set_anchor_values(anchor, self.decay_values[anchor], harmonic)
+        self._sync_selected_amplitude(); self._sync_selected_decay()
 
     def _bar_changed(self, anchor: int, harmonic: int, value: float) -> None:
         self.amp_values[anchor][harmonic] = value
         self._selected_anchor, self._selected_harmonic = anchor, harmonic
-        self._sync_selected_amplitude(); self._schedule_preview()
+        self.decay_canvas.set_anchor_values(anchor, self.decay_values[anchor], harmonic)
+        self._sync_selected_amplitude(); self._sync_selected_decay(); self._schedule_preview()
 
     def _sync_selected_amplitude(self) -> None:
         value = self.amp_values[self._selected_anchor][self._selected_harmonic]
@@ -287,9 +281,42 @@ class HarmonicEditor(tk.Tk):
         self.bar_canvases[self._selected_anchor].set_values(self.amp_values[self._selected_anchor])
         self._schedule_preview()
 
-    def _decay_changed(self, point: int, value: float) -> None:
-        self.decay_curve_values[point] = value
-        self.decay_point_var.set(f"当前点：{DECAY_FREQUENCIES_HZ[point]:g} Hz，时间常数 {value:.0f} ms；发送时自动展开为4×16组参数。")
+    def _decay_selected(self, anchor: int, harmonic: int) -> None:
+        self._selected_anchor, self._selected_harmonic = anchor, harmonic
+        self.bar_canvases[anchor].selected = harmonic
+        self.bar_canvases[anchor].redraw()
+        self._sync_selected_amplitude(); self._sync_selected_decay()
+
+    def _decay_changed(self, anchor: int, harmonic: int, value: float) -> None:
+        self.decay_values[anchor][harmonic] = value
+        self._selected_anchor, self._selected_harmonic = anchor, harmonic
+        self._sync_selected_decay()
+
+    def _sync_selected_decay(self) -> None:
+        value = self.decay_values[self._selected_anchor][self._selected_harmonic]
+        self.selected_decay_label_var.set(
+            f"{ANCHOR_NAMES[self._selected_anchor]} / {self._selected_harmonic + 1}×"
+        )
+        self.selected_decay_var.set(f"{value:.3f}")
+        frequency = (440.0 * 2.0 ** ((ANCHOR_MIDI_NOTES[self._selected_anchor] - 69) / 12.0)
+                     * (self._selected_harmonic + 1))
+        self.decay_point_var.set(f"该分音约 {frequency:.1f} Hz")
+
+    def _apply_exact_decay(self) -> None:
+        try:
+            value = float(self.selected_decay_var.get())
+        except ValueError:
+            value = -1.0
+        if not math.isfinite(value) or not 0.0 <= value <= MAX_DECAY_MS:
+            messagebox.showerror("衰减错误", "时间常数必须为0～120000 ms；0表示不额外衰减。"); return
+        anchor, harmonic = self._selected_anchor, self._selected_harmonic
+        self.decay_values[anchor][harmonic] = value
+        self.decay_canvas.set_anchor_values(anchor, self.decay_values[anchor], harmonic)
+        self._sync_selected_decay()
+
+    def _disable_selected_decay(self) -> None:
+        self.selected_decay_var.set("0")
+        self._apply_exact_decay()
 
     def _schedule_preview(self, *_args) -> None:
         if self._preview_job is not None:
@@ -375,58 +402,27 @@ class HarmonicEditor(tk.Tk):
         elif source == "pnp":
             self.status_var.set("这些COM号来自Windows设备列表；请选择板载调试器端口。")
 
-    def _derive_curve_from_legacy_table(self, preset: dict) -> list[float]:
-        samples: list[tuple[float, float]] = []
-        for note, anchor in zip(ANCHOR_MIDI_NOTES, preset["anchors"]):
-            for harmonic, decay_ms in enumerate(anchor["decay_ms"], 1):
-                if float(decay_ms) > 0:
-                    samples.append((midi_frequency(note) * harmonic, float(decay_ms)))
-        result = []
-        for target in DECAY_FREQUENCIES_HZ:
-            nearest = sorted(samples, key=lambda item: abs(math.log(item[0] / target)))[:6]
-            weights = [1.0 / (0.04 + abs(math.log(frequency / target))) for frequency, _value in nearest]
-            mean = sum(weight * math.log(max(value, MIN_DECAY_MS))
-                       for weight, (_frequency, value) in zip(weights, nearest)) / sum(weights)
-            result.append(max(MIN_DECAY_MS, min(MAX_DECAY_MS, math.exp(mean))))
-        return result
-
-    def _curve_from_preset(self, preset: dict) -> list[float]:
-        curve = preset.get("decay_curve")
-        if isinstance(curve, dict):
-            xs = [float(value) for value in curve.get("frequencies_hz", [])]
-            ys = [float(value) for value in curve.get("time_constants_ms", [])]
-            if len(xs) >= 2 and len(xs) == len(ys) and all(value > 0 for value in xs + ys):
-                pairs = sorted(zip(xs, ys)); xs, ys = [x for x, _y in pairs], [y for _x, y in pairs]
-                return [max(MIN_DECAY_MS, min(MAX_DECAY_MS, log_interpolate(xs, ys, target)))
-                        for target in DECAY_FREQUENCIES_HZ]
-        return self._derive_curve_from_legacy_table(preset)
-
-    def _expanded_decay_table(self) -> list[list[float]]:
-        xs, ys = list(DECAY_FREQUENCIES_HZ), self.decay_curve_values
-        return [[round(log_interpolate(xs, ys, midi_frequency(note) * harmonic), 3)
-                 for harmonic in range(1, 17)] for note in ANCHOR_MIDI_NOTES]
-
     def _load_into_widgets(self, preset: dict) -> None:
         self.preset = deepcopy(preset)
         for key, variable in self.adsr_vars.items(): variable.set(str(preset["adsr"][key]))
         for anchor, data in enumerate(preset["anchors"]):
             self.amp_values[anchor] = [float(value) for value in data["amplitudes"]]
+            self.decay_values[anchor] = [float(value) for value in data["decay_ms"]]
             self.bar_canvases[anchor].set_values(self.amp_values[anchor])
-        self.decay_curve_values = self._curve_from_preset(preset)
-        self.decay_canvas.set_values(self.decay_curve_values)
-        self._decay_changed(0, self.decay_curve_values[0])
-        self._sync_selected_amplitude(); self._schedule_preview()
+        self.decay_canvas.set_anchor_values(
+            self._selected_anchor, self.decay_values[self._selected_anchor],
+            self._selected_harmonic,
+        )
+        self._sync_selected_amplitude(); self._sync_selected_decay(); self._schedule_preview()
 
     def _collect(self) -> dict:
         preset = deepcopy(self.preset); preset["format"] = "gowin-additive-tone-v2"
         preset["adsr"] = {key: float(variable.get()) for key, variable in self.adsr_vars.items()}
-        table = self._expanded_decay_table()
         for anchor, data in enumerate(preset["anchors"]):
             data["amplitudes"] = [round(value, 6) for value in self.amp_values[anchor]]
-            data["decay_ms"] = table[anchor]
-        preset["decay_curve"] = {"mode": "global-frequency-log-interpolation",
-            "frequencies_hz": list(DECAY_FREQUENCIES_HZ),
-            "time_constants_ms": [round(value, 3) for value in self.decay_curve_values]}
+            data["decay_ms"] = [round(value, 3) for value in self.decay_values[anchor]]
+        preset.pop("decay_curve", None)
+        preset["decay_table_source"] = "independent-4anchor-x-16partial"
         preset_packets(preset)
         return preset
 

@@ -4,6 +4,7 @@
 add_file -type verilog "src/i2s_tx.v"
 add_file -type verilog "src/uart_rx.v"
 add_file -type verilog "src/synth_uart_control.v"
+add_file -type verilog "src/midi_strum_controller.v"
 add_file -type verilog "src/midi_poly_synth.v"
 add_file -type verilog "src/midi_performance_control.v"
 add_file -type verilog "src/audio_effects.v"

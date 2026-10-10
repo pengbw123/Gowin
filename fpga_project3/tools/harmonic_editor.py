@@ -12,7 +12,8 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 from additive_uart_protocol import (
-    ANCHOR_MIDI_NOTES, ANCHOR_NAMES, load_preset, preset_packets, send_packets,
+    ANCHOR_MIDI_NOTES, ANCHOR_NAMES, DEFAULT_PERFORMANCE, load_preset,
+    preset_packets, send_packets, strum_packet,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -26,7 +27,7 @@ class HarmonicBarCanvas(tk.Canvas):
     def __init__(self, master: tk.Misc, anchor: int,
                  on_change: Callable[[int, int, float], None],
                  on_select: Callable[[int, int], None]) -> None:
-        super().__init__(master, height=245, background="#0b111b",
+        super().__init__(master, height=215, background="#0b111b",
                          highlightthickness=1, highlightbackground="#31445a",
                          cursor="sb_v_double_arrow")
         self.anchor, self.on_change, self.on_select = anchor, on_change, on_select
@@ -80,7 +81,7 @@ class HarmonicDecayCanvas(tk.Canvas):
     def __init__(self, master: tk.Misc, anchor: int,
                  on_change: Callable[[int, int, float], None],
                  on_select: Callable[[int, int], None]) -> None:
-        super().__init__(master, height=190, background="#120e25",
+        super().__init__(master, height=160, background="#120e25",
                          highlightthickness=1, highlightbackground="#493b70",
                          cursor="sb_v_double_arrow")
         self.anchor, self.on_change, self.on_select = anchor, on_change, on_select
@@ -153,8 +154,8 @@ class HarmonicEditor(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Primer 25K 四基准加法音色编辑器")
-        self.geometry("1060x760")
-        self.minsize(920, 680)
+        self.geometry("1060x720")
+        self.minsize(920, 640)
         self.preset = load_preset(DEFAULT_PRESET)
         self.port_var = tk.StringVar()
         self.status_var = tk.StringVar(value="四基准各自保存16组独立相对衰减；修改后点击“发送全部”。")
@@ -165,6 +166,11 @@ class HarmonicEditor(tk.Tk):
         self.selected_decay_var = tk.StringVar(value="0")
         self.selected_decay_label_var = tk.StringVar(value="C2 / 1×")
         self.decay_point_var = tk.StringVar()
+        self.performance_mode_var = tk.StringVar(value="普通演奏")
+        self.strum_interval_var = tk.StringVar(value="18")
+        self.strum_gate_var = tk.StringVar(value="120")
+        self.strum_speed_depth_var = tk.StringVar(value="80")
+        self.strum_brightness_depth_var = tk.StringVar(value="96")
         # Keep Python 3.7 compatibility (the bundled Gowin-side Python on some
         # machines is older than the interpreter used during development).
         self._preview_job = None
@@ -193,6 +199,21 @@ class HarmonicEditor(tk.Tk):
         for column, (key, label) in enumerate(labels):
             ttk.Label(adsr, text=label).grid(row=0, column=column * 2, padx=(4, 2))
             ttk.Entry(adsr, textvariable=self.adsr_vars[key], width=10).grid(row=0, column=column * 2 + 1, padx=(0, 12))
+
+        performance = ttk.LabelFrame(self, text="演奏方式（扫弦模式：按住3～4个琴键，Pad 1下扫，Pad 2上扫）", padding=(8, 4))
+        performance.pack(fill="x", padx=8, pady=(0, 3))
+        ttk.Label(performance, text="模式").pack(side="left")
+        ttk.Combobox(performance, textvariable=self.performance_mode_var,
+                     values=("普通演奏", "吉他扫弦"), state="readonly", width=9).pack(side="left", padx=(3, 10))
+        ttk.Label(performance, text="弦间隔/ms").pack(side="left")
+        ttk.Entry(performance, textvariable=self.strum_interval_var, width=6).pack(side="left", padx=(3, 10))
+        ttk.Label(performance, text="Gate/ms").pack(side="left")
+        ttk.Entry(performance, textvariable=self.strum_gate_var, width=7).pack(side="left", padx=(3, 10))
+        ttk.Label(performance, text="力度→速度 0..127").pack(side="left")
+        ttk.Entry(performance, textvariable=self.strum_speed_depth_var, width=5).pack(side="left", padx=(3, 10))
+        ttk.Label(performance, text="力度→亮度 0..127").pack(side="left")
+        ttk.Entry(performance, textvariable=self.strum_brightness_depth_var, width=5).pack(side="left", padx=(3, 8))
+        ttk.Button(performance, text="只发送演奏设置", command=self._send_performance).pack(side="right")
 
         middle = ttk.Panedwindow(self, orient="horizontal"); middle.pack(fill="both", expand=True, padx=8, pady=2)
         spectra = ttk.LabelFrame(middle, text="四基准谐波幅度（拖动柱形）", padding=(6, 3)); middle.add(spectra, weight=3)
@@ -409,6 +430,13 @@ class HarmonicEditor(tk.Tk):
             self.amp_values[anchor] = [float(value) for value in data["amplitudes"]]
             self.decay_values[anchor] = [float(value) for value in data["decay_ms"]]
             self.bar_canvases[anchor].set_values(self.amp_values[anchor])
+        performance = preset.get("performance", DEFAULT_PERFORMANCE)
+        self.performance_mode_var.set(
+            "吉他扫弦" if performance.get("mode") == "strum" else "普通演奏")
+        self.strum_interval_var.set(str(performance.get("strum_interval_ms", 18)))
+        self.strum_gate_var.set(str(performance.get("strum_gate_ms", 120)))
+        self.strum_speed_depth_var.set(str(performance.get("velocity_speed_depth", 80)))
+        self.strum_brightness_depth_var.set(str(performance.get("velocity_brightness_depth", 96)))
         self.decay_canvas.set_anchor_values(
             self._selected_anchor, self.decay_values[self._selected_anchor],
             self._selected_harmonic,
@@ -423,8 +451,28 @@ class HarmonicEditor(tk.Tk):
             data["decay_ms"] = [round(value, 3) for value in self.decay_values[anchor]]
         preset.pop("decay_curve", None)
         preset["decay_table_source"] = "independent-4anchor-x-16partial"
+        preset["performance"] = {
+            "mode": "strum" if self.performance_mode_var.get() == "吉他扫弦" else "normal",
+            "strum_interval_ms": int(self.strum_interval_var.get()),
+            "strum_gate_ms": int(self.strum_gate_var.get()),
+            "velocity_speed_depth": int(self.strum_speed_depth_var.get()),
+            "velocity_brightness_depth": int(self.strum_brightness_depth_var.get()),
+        }
         preset_packets(preset)
         return preset
+
+    def _send_performance(self) -> None:
+        port = self.port_var.get().strip()
+        if not port:
+            messagebox.showerror("没有串口", "请选择板载调试器对应的COM口。"); return
+        try:
+            preset = self._collect()
+            count = send_packets(port, [strum_packet(preset["performance"])])
+            self.preset = preset
+            mode = "扫弦" if preset["performance"]["mode"] == "strum" else "普通"
+            self.status_var.set(f"已发送{count}包演奏设置；当前为{mode}模式。")
+        except Exception as error:
+            messagebox.showerror("发送失败", f"{error}\n\n请关闭占用同一COM口的串口助手后重试。")
 
     def _load_file(self) -> None:
         path = filedialog.askopenfilename(filetypes=(("Tone JSON", "*.json"), ("All files", "*.*")))

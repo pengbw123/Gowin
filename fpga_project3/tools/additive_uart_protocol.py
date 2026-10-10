@@ -21,6 +21,15 @@ CMD_RELEASE = 0x13
 CMD_HARMONIC_AMPLITUDE = 0x40
 CMD_HARMONIC_DECAY = 0x41
 CMD_COMMIT = 0x42
+CMD_STRUM_CONFIG = 0x50
+
+DEFAULT_PERFORMANCE = {
+    "mode": "normal",
+    "strum_interval_ms": 18,
+    "strum_gate_ms": 120,
+    "velocity_speed_depth": 80,
+    "velocity_brightness_depth": 96,
+}
 
 
 def make_packet(command: int, payload: bytes = bytes(8)) -> bytes:
@@ -83,6 +92,29 @@ def commit_packet() -> bytes:
     return make_packet(CMD_COMMIT)
 
 
+def strum_packet(performance: dict) -> bytes:
+    mode = str(performance.get("mode", "normal")).lower()
+    if mode not in ("normal", "strum"):
+        raise ValueError("performance mode must be normal or strum")
+    interval = int(performance.get("strum_interval_ms", 18))
+    gate = int(performance.get("strum_gate_ms", 120))
+    speed_depth = int(performance.get("velocity_speed_depth", 80))
+    brightness_depth = int(performance.get("velocity_brightness_depth", 96))
+    if not 1 <= interval <= 500:
+        raise ValueError("strum interval must be between 1 and 500 ms")
+    if not 1 <= gate <= 5000:
+        raise ValueError("strum gate must be between 1 and 5000 ms")
+    if not 0 <= speed_depth <= 127 or not 0 <= brightness_depth <= 127:
+        raise ValueError("velocity depths must be between 0 and 127")
+    payload = bytearray(8)
+    payload[0] = 1 if mode == "strum" else 0
+    struct.pack_into("<H", payload, 1, interval)
+    struct.pack_into("<H", payload, 3, gate)
+    payload[5] = speed_depth
+    payload[6] = brightness_depth
+    return make_packet(CMD_STRUM_CONFIG, bytes(payload))
+
+
 def validate_preset(preset: dict) -> None:
     anchors = preset.get("anchors", [])
     if len(anchors) != 4:
@@ -103,6 +135,7 @@ def validate_preset(preset: dict) -> None:
     for name in ("attack_ms", "decay_ms", "sustain", "release_ms"):
         if name not in adsr:
             raise ValueError(f"preset ADSR is missing {name}")
+    strum_packet(preset.get("performance", DEFAULT_PERFORMANCE))
 
 
 def preset_packets(preset: dict) -> list[bytes]:
@@ -120,6 +153,7 @@ def preset_packets(preset: dict) -> list[bytes]:
         for harmonic_index, value in enumerate(anchor["decay_ms"]):
             packets.append(harmonic_decay_packet(anchor_index, harmonic_index, float(value)))
     packets.append(commit_packet())
+    packets.append(strum_packet(preset.get("performance", DEFAULT_PERFORMANCE)))
     return packets
 
 

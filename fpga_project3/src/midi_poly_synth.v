@@ -17,6 +17,7 @@ module midi_poly_synth #(
     input  wire               sample_tick,
     input  wire [31:0]        midi_event_data,
     input  wire               midi_event_valid,
+    input  wire [6:0]         midi_event_brightness,
     output wire               midi_event_ready,
 
     input  wire [31:0]        amp_attack_samples,
@@ -73,6 +74,7 @@ module midi_poly_synth #(
     localparam [4:0] ENGINE_PITCH_APPLY        = 5'd18;
     localparam [4:0] ENGINE_GLIDE_CALC         = 5'd19;
     localparam [4:0] ENGINE_PITCH_MULT         = 5'd20;
+    localparam [4:0] ENGINE_INIT_BRIGHTNESS    = 5'd21;
 
     localparam [6:0] DEFAULT_MASTER_VOLUME =
         ((`TONE_MASTER_GAIN_Q15 * 32'd127) + 32'd16384) >> 15;
@@ -148,6 +150,7 @@ module midi_poly_synth #(
     reg sustain_pedal;
     reg sample_pending;
     reg [31:0] pending_event;
+    reg [6:0] pending_event_brightness;
     reg event_pending;
     assign midi_event_ready = ~event_pending;
 
@@ -411,6 +414,7 @@ module midi_poly_synth #(
     reg [2:0] quietest_index;
     reg [6:0] allocation_note;
     reg [6:0] allocation_velocity;
+    reg [6:0] allocation_brightness;
     reg [1:0] init_anchor_left;
     reg [4:0] init_anchor_fraction;
     reg [1:0] init_anchor_right;
@@ -418,6 +422,8 @@ module midi_poly_synth #(
     reg [5:0] init_right_address;
     reg [15:0] init_left_amp;
     reg [23:0] init_left_decay;
+    reg [15:0] init_interpolated_amp;
+    reg [23:0] init_interpolated_decay;
     reg [6:0] master_volume_target;
     reg [6:0] master_volume_current;
     reg [7:0] event_status;
@@ -441,6 +447,36 @@ module midi_poly_synth #(
     wire [31:0] allocation_glide_step =
         (allocation_glide_step_shifted == 0) ? 32'd1
                                              : allocation_glide_step_shifted;
+
+    // A soft pick suppresses upper partials while preserving the fundamental.
+    // Shift-only gain bands avoid adding a DSP to the already DSP-full 25K.
+    reg [1:0] init_brightness_shift;
+    always @* begin
+        init_brightness_shift = 2'd0;
+        if (init_harmonic_index != 0) begin
+            if (allocation_brightness >= 7'd96) begin
+                if (init_harmonic_index >= 12)
+                    init_brightness_shift = 2'd1;
+            end else if (allocation_brightness >= 7'd64) begin
+                if (init_harmonic_index >= 14)
+                    init_brightness_shift = 2'd2;
+                else if (init_harmonic_index >= 8)
+                    init_brightness_shift = 2'd1;
+            end else if (allocation_brightness >= 7'd32) begin
+                if (init_harmonic_index >= 10)
+                    init_brightness_shift = 2'd2;
+                else if (init_harmonic_index >= 4)
+                    init_brightness_shift = 2'd1;
+            end else begin
+                if (init_harmonic_index >= 13)
+                    init_brightness_shift = 2'd3;
+                else if (init_harmonic_index >= 7)
+                    init_brightness_shift = 2'd2;
+                else if (init_harmonic_index >= 2)
+                    init_brightness_shift = 2'd1;
+            end
+        end
+    end
 
     always @* begin
         init_anchor_right = (init_anchor_left == 2'd3)
@@ -488,6 +524,7 @@ module midi_poly_synth #(
             sustain_pedal       <= 1'b0;
             sample_pending      <= 1'b0;
             pending_event       <= 32'd0;
+            pending_event_brightness <= 7'd127;
             event_pending       <= 1'b0;
             engine_state        <= ENGINE_IDLE;
             engine_watchdog     <= 16'd0;
@@ -531,11 +568,14 @@ module midi_poly_synth #(
             quietest_index        <= 3'd0;
             allocation_note       <= 7'd0;
             allocation_velocity   <= 7'd0;
+            allocation_brightness <= 7'd127;
             init_anchor_left       <= 2'd0;
             init_anchor_fraction   <= 5'd0;
             harmonic_read_address  <= 6'd0;
             init_left_amp          <= 16'd0;
             init_left_decay        <= 24'd0;
+            init_interpolated_amp  <= 16'd0;
+            init_interpolated_decay <= 24'd0;
             master_volume_target   <= DEFAULT_MASTER_VOLUME;
             master_volume_current  <= DEFAULT_MASTER_VOLUME;
             last_voice_index       <= 3'd0;
@@ -584,6 +624,7 @@ module midi_poly_synth #(
 
             if (midi_event_valid && midi_event_ready) begin
                 pending_event <= midi_event_data;
+                pending_event_brightness <= midi_event_brightness;
                 event_pending <= 1'b1;
             end
 
@@ -598,6 +639,7 @@ module midi_poly_synth #(
                         if (((event_status & 8'hf0) == 8'h90) && (event_data2 != 0)) begin
                             allocation_note       <= event_data1;
                             allocation_velocity   <= event_data2;
+                            allocation_brightness <= pending_event_brightness;
                             allocation_legato     <= (portamento_time != 0) &&
                                                      any_key_down &&
                                                      voice_active[last_voice_index];
@@ -749,17 +791,23 @@ module midi_poly_synth #(
                     engine_state <= ENGINE_INIT_WRITE;
 
                 ENGINE_INIT_WRITE: begin
-                    partial_level[init_partial_address] <= {
-                        interpolate_u16(
-                            init_left_amp,
-                            harmonic_amp_read,
-                            init_anchor_fraction),
-                        16'd0
-                    };
-                    partial_decay[init_partial_address] <= interpolate_u24(
+                    init_interpolated_amp <= interpolate_u16(
+                        init_left_amp,
+                        harmonic_amp_read,
+                        init_anchor_fraction);
+                    init_interpolated_decay <= interpolate_u24(
                         init_left_decay,
                         harmonic_decay_read,
                         init_anchor_fraction);
+                    engine_state <= ENGINE_INIT_BRIGHTNESS;
+                end
+
+                ENGINE_INIT_BRIGHTNESS: begin
+                    partial_level[init_partial_address] <= {
+                        (init_interpolated_amp >> init_brightness_shift),
+                        16'd0};
+                    partial_decay[init_partial_address] <=
+                        init_interpolated_decay;
                     if (init_harmonic_index == HARMONIC_COUNT - 1) begin
                         engine_state <= ENGINE_IDLE;
                     end else begin

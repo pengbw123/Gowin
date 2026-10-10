@@ -118,7 +118,7 @@ module top (
     reg [1:0] midi_request_sync;
     reg [31:0] midi_event_latched;
     reg midi_event_valid;
-    wire midi_event_ready;
+    wire raw_midi_event_ready;
 
     always @(posedge clk or negedge audio_reset_n) begin
         if (!audio_reset_n) begin
@@ -130,7 +130,7 @@ module top (
             midi_request_sync <= {midi_request_sync[0], usb_midi_event_toggle};
             midi_event_valid <= 1'b0;
             if ((midi_request_sync[1] != midi_event_ack_toggle) &&
-                midi_event_ready) begin
+                raw_midi_event_ready) begin
                 midi_event_latched <= usb_midi_event_data;
                 midi_event_valid <= 1'b1;
                 midi_event_ack_toggle <= midi_request_sync[1];
@@ -183,6 +183,11 @@ module top (
     wire [3:0]  harmonic_write_index;
     wire [23:0] harmonic_write_value;
     wire        harmonic_commit;
+    wire        strum_mode;
+    wire [15:0] strum_interval_ms;
+    wire [15:0] strum_gate_ms;
+    wire [6:0]  strum_velocity_speed_depth;
+    wire [6:0]  strum_velocity_brightness_depth;
     wire        uart_packet_received;
     wire        uart_packet_error;
 
@@ -211,17 +216,56 @@ module top (
         .harmonic_write_index(harmonic_write_index),
         .harmonic_write_value(harmonic_write_value),
         .harmonic_commit(harmonic_commit),
+        .strum_mode(strum_mode),
+        .strum_interval_ms(strum_interval_ms),
+        .strum_gate_ms(strum_gate_ms),
+        .strum_velocity_speed_depth(strum_velocity_speed_depth),
+        .strum_velocity_brightness_depth(strum_velocity_brightness_depth),
         .packet_received(uart_packet_received),
         .packet_error(uart_packet_error)
+    );
+
+    wire [31:0] synth_midi_event_data;
+    wire        synth_midi_event_valid;
+    wire        synth_midi_event_ready;
+    wire [6:0]  synth_midi_event_brightness;
+    wire [2:0]  held_note_count;
+    wire        strum_active;
+    wire [6:0]  synth_portamento_time = strum_mode ? 7'd0
+                                                   : portamento_time;
+
+    // Keep performance interpretation separate from sound generation.  The
+    // controller is transparent in normal mode; in strum mode it turns a held
+    // chord plus Pad 1/Pad 2 into timed low-to-high/high-to-low MIDI events.
+    midi_strum_controller u_midi_strum_controller (
+        .clk(clk),
+        .reset_n(audio_reset_n),
+        .sample_tick(sample_tick),
+        .midi_connected(usb_midi_connected),
+        .raw_event_data(midi_event_latched),
+        .raw_event_valid(midi_event_valid),
+        .raw_event_ready(raw_midi_event_ready),
+        .synth_event_data(synth_midi_event_data),
+        .synth_event_valid(synth_midi_event_valid),
+        .synth_event_brightness(synth_midi_event_brightness),
+        .synth_event_ready(synth_midi_event_ready),
+        .strum_mode(strum_mode),
+        .strum_interval_ms(strum_interval_ms),
+        .strum_gate_ms(strum_gate_ms),
+        .velocity_speed_depth(strum_velocity_speed_depth),
+        .velocity_brightness_depth(strum_velocity_brightness_depth),
+        .held_note_count(held_note_count),
+        .strum_active(strum_active)
     );
 
     midi_poly_synth #(.VOICE_COUNT(8)) u_midi_poly_synth (
         .clk(clk),
         .reset_n(audio_reset_n),
         .sample_tick(sample_tick),
-        .midi_event_data(midi_event_latched),
-        .midi_event_valid(midi_event_valid),
-        .midi_event_ready(midi_event_ready),
+        .midi_event_data(synth_midi_event_data),
+        .midi_event_valid(synth_midi_event_valid),
+        .midi_event_brightness(synth_midi_event_brightness),
+        .midi_event_ready(synth_midi_event_ready),
         .amp_attack_samples(amp_attack_samples),
         .amp_attack_phase_inc(amp_attack_phase_inc),
         .amp_decay_samples(amp_decay_samples),
@@ -238,7 +282,7 @@ module top (
         .pitch_bend(pitch_bend),
         .vibrato_depth(vibrato_depth),
         .vibrato_rate(vibrato_rate),
-        .portamento_time(portamento_time),
+        .portamento_time(synth_portamento_time),
         .sample_out(synth_sample),
         .active_voice_count(active_voice_count)
     );
@@ -267,8 +311,9 @@ module top (
         .i2s_din(i2s_din)
     );
 
-    wire unused_midi_connected = usb_midi_connected;
     wire [3:0] unused_active_voice_count = active_voice_count;
+    wire [2:0] unused_held_note_count = held_note_count;
+    wire unused_strum_active = strum_active;
     wire unused_uart_packet_received = uart_packet_received;
     wire unused_uart_packet_error = uart_packet_error;
     wire unused_usb_debug_reset_n = usb_debug_reset_n;

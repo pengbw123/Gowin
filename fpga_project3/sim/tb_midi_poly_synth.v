@@ -18,6 +18,7 @@ module tb_midi_poly_synth;
         .sample_tick(sample_tick),
         .midi_event_data(midi_event_data),
         .midi_event_valid(midi_event_valid),
+        .midi_event_brightness(7'd127),
         .midi_event_ready(midi_event_ready),
         .amp_attack_samples(32'd16),
         .amp_attack_phase_inc(32'h11111111),

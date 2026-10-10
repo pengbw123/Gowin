@@ -14,6 +14,8 @@
 //   40:       harmonic amplitude {anchor:u8, harmonic:u8, amp_q15:u16}
 //   41:       harmonic decay {anchor:u8, harmonic:u8, alpha_q24:u24}
 //   42:       end-of-update marker (reserved for future double buffering)
+//   50:       strum {mode:u8, interval_ms:u16, gate_ms:u16,
+//                    velocity_speed:u8, velocity_brightness:u8, reserved:u8}
 module synth_uart_control #(
     parameter [31:0] AMP_ATTACK_SAMPLES      = 32'd1,
     parameter [31:0] AMP_ATTACK_PHASE_INC    = 32'hFFFFFFFF,
@@ -41,6 +43,12 @@ module synth_uart_control #(
     output reg  [3:0]  harmonic_write_index,
     output reg  [23:0] harmonic_write_value,
     output reg         harmonic_commit,
+
+    output reg         strum_mode,
+    output reg  [15:0] strum_interval_ms,
+    output reg  [15:0] strum_gate_ms,
+    output reg  [6:0]  strum_velocity_speed_depth,
+    output reg  [6:0]  strum_velocity_brightness_depth,
 
     output reg         packet_received,
     output reg         packet_error
@@ -95,6 +103,11 @@ module synth_uart_control #(
             harmonic_write_index     <= 4'd0;
             harmonic_write_value     <= 24'd0;
             harmonic_commit          <= 1'b0;
+            strum_mode                <= 1'b0;
+            strum_interval_ms         <= 16'd18;
+            strum_gate_ms             <= 16'd120;
+            strum_velocity_speed_depth <= 7'd80;
+            strum_velocity_brightness_depth <= 7'd96;
             packet_received          <= 1'b0;
             packet_error             <= 1'b0;
         end else begin
@@ -162,6 +175,21 @@ module synth_uart_control #(
                                     end
                                 end
                                 8'h42: harmonic_commit <= 1'b1;
+                                8'h50: begin
+                                    strum_mode <= payload[0];
+                                    strum_interval_ms <=
+                                        (payload[23:8] == 0) ? 16'd1
+                                                             : payload[23:8];
+                                    strum_gate_ms <=
+                                        (payload[39:24] == 0) ? 16'd1
+                                                              : payload[39:24];
+                                    strum_velocity_speed_depth <=
+                                        (payload[47:40] > 127) ? 7'd127
+                                                               : payload[46:40];
+                                    strum_velocity_brightness_depth <=
+                                        (payload[55:48] > 127) ? 7'd127
+                                                               : payload[54:48];
+                                end
                                 default: packet_error <= 1'b1;
                             endcase
                         end

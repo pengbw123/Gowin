@@ -7,5 +7,5 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo Installation completed. You can now run run_harmonic_editor.bat or run_instrument_analyzer.bat.
+echo Installation completed. You can now run the editors, analysers, or run_uart_midi_player.bat.
 pause

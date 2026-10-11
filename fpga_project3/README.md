@@ -102,6 +102,10 @@ Portamento只在LATCH非零且新音以连奏方式按下时启动。此时复�
 
 两个接收端可以同时观察 `uart_rx_pin`，不需要增加新的引脚。使用上位机时必须先关闭占用同一COM口的串口助手。
 
+除音色参数编辑外，当前UART还可注入标准MIDI事件。运行`tools/run_uart_midi_player.bat`后可播放任意标准`.mid/.midi`，歌曲音符使用MIDI 0～127完整范围，不受实体25键当前OCT档位限制。软件显示歌曲音域、峰值复音和全音域琴键，支持播放/暂停/停止/跳转、0.5～1.5倍速度、±24半音移调、力度比例和鼠标试音。暂停、停止、跳转或退出都会发送延音关闭和All Notes Off。
+
+串口歌曲与USB键盘在合成器入口处仲裁：上位机自动演奏时，实体键盘仍然在线，MODE旋钮的CC20仍控制板端总音量。当前音源为8复音，复杂MIDI超过8个同时音符时会触发现有声部抢占。内置的`Für Elise`示例来自Mutopia公开领域版本；《The Truth That You Leave》等现代曲目不随工程分发，但用户合法取得的MIDI可直接载入。
+
 安装依赖并启动图形编辑器：
 
 ```powershell
@@ -219,9 +223,11 @@ CHECKSUM = XOR(CMD, DATA0..DATA7)
 | `13` | Release采样数和曲线相位步进 |
 | `14` | Pitch包络采样数和曲线相位步进 |
 | `20` | 包络表号、地址和16位表值；表号0/1/2/3对应A/D/R/Pitch |
+| `30` | 实时MIDI事件：status、data1、data2、brightness |
 | `40` | 基准、谐波序号、幅度Q1.15 |
 | `41` | 基准、谐波序号、衰减系数Q0.24 |
 | `42` | 本轮参数发送结束标记 |
+| `50` | 扫弦模式、弦间隔、Gate和力度映射 |
 
 ## 默认音色文件
 
@@ -262,12 +268,12 @@ python .\tools\generate_additive_tables.py
 
 | 资源 | 使用量 |
 | --- | ---: |
-| Logic | 14230 / 23040，62% |
-| Register | 5896 / 23280，26% |
+| Logic | 14087 / 23040，62% |
+| Register | 5917 / 23280，26% |
 | BSRAM | 51 / 56，92% |
 | DSP | 26.5 / 28，95% |
 
-50 MHz音频域实际Fmax为50.041 MHz，47.917 MHz USB域实际Fmax为62.950 MHz，TNS为0，无Setup/Hold违例。四张包络数组均被综合为片上RAM；Pitch倍率增加一段定点乘法。当前最慢路径仍在动态声部索引到滑音相位步进逻辑。生成文件为`impl/pnr/fpga_project.fs`。25K已接近BRAM与DSP上限，动态滤波、视频显示和更大规模复音应迁移到60K。
+50 MHz音频域实际Fmax为50.036 MHz，47.917 MHz USB域实际Fmax为54.348 MHz，TNS为0，无Setup/Hold违例。四张包络数组均被综合为片上RAM；Pitch倍率增加一段定点乘法。当前最慢路径仍在合成器的动态声部状态访问。生成文件为`impl/pnr/fpga_project.fs`。25K已接近BRAM与DSP上限，动态滤波、视频显示和更大规模复音应迁移到60K。
 
 ## 长时间演奏的数字自恢复
 

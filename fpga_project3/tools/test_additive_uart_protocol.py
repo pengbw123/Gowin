@@ -3,8 +3,8 @@ from pathlib import Path
 
 from additive_uart_protocol import (
     CMD_ENVELOPE_TABLE_POINT, CMD_PITCH_ENVELOPE_TIME, CMD_STRUM_CONFIG,
-    TABLE_PITCH_RATIO, envelope_packets, envelope_table_packet, load_preset,
-    make_packet, strum_packet,
+    CMD_MIDI_EVENT, TABLE_PITCH_RATIO, envelope_packets, envelope_table_packet,
+    load_preset, make_packet, midi_event_packet, strum_packet,
 )
 
 
@@ -42,6 +42,18 @@ class StrumPacketTests(unittest.TestCase):
         self.assertEqual(packets[4][2], CMD_PITCH_ENVELOPE_TIME)
         # The default pitch envelope is neutral: Q4.12 ratio 1.0 = 0x1000.
         self.assertEqual(packets[-1][3:7], bytes((TABLE_PITCH_RATIO, 255, 0x00, 0x10)))
+
+    def test_midi_event_packet_uses_full_note_number(self):
+        packet = midi_event_packet(0x92, 108, 117)
+        self.assertEqual(len(packet), 12)
+        self.assertEqual(packet[:3], bytes((0xA5, 0x5A, CMD_MIDI_EVENT)))
+        self.assertEqual(packet[3:7], bytes((0x92, 108, 117, 117)))
+        self.assertEqual(packet, make_packet(CMD_MIDI_EVENT, packet[3:11]))
+
+    def test_midi_event_rejects_invalid_data_byte(self):
+        with self.assertRaises(ValueError):
+            midi_event_packet(0x90, 128, 100)
+
 
 
 if __name__ == "__main__":

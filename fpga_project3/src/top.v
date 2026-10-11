@@ -194,6 +194,10 @@ module top (
     wire [15:0] strum_gate_ms;
     wire [6:0]  strum_velocity_speed_depth;
     wire [6:0]  strum_velocity_brightness_depth;
+    wire [31:0] uart_midi_event_data;
+    wire        uart_midi_event_valid;
+    wire [6:0]  uart_midi_event_brightness;
+    wire        uart_midi_event_ready;
     wire        uart_packet_received;
     wire        uart_packet_error;
 
@@ -235,10 +239,18 @@ module top (
         .strum_gate_ms(strum_gate_ms),
         .strum_velocity_speed_depth(strum_velocity_speed_depth),
         .strum_velocity_brightness_depth(strum_velocity_brightness_depth),
+        .midi_event_data(uart_midi_event_data),
+        .midi_event_valid(uart_midi_event_valid),
+        .midi_event_brightness(uart_midi_event_brightness),
+        .midi_event_ready(uart_midi_event_ready),
         .packet_received(uart_packet_received),
         .packet_error(uart_packet_error)
     );
 
+    wire [31:0] strum_midi_event_data;
+    wire        strum_midi_event_valid;
+    wire        strum_midi_event_ready;
+    wire [6:0]  strum_midi_event_brightness;
     wire [31:0] synth_midi_event_data;
     wire        synth_midi_event_valid;
     wire        synth_midi_event_ready;
@@ -259,10 +271,10 @@ module top (
         .raw_event_data(midi_event_latched),
         .raw_event_valid(midi_event_valid),
         .raw_event_ready(raw_midi_event_ready),
-        .synth_event_data(synth_midi_event_data),
-        .synth_event_valid(synth_midi_event_valid),
-        .synth_event_brightness(synth_midi_event_brightness),
-        .synth_event_ready(synth_midi_event_ready),
+        .synth_event_data(strum_midi_event_data),
+        .synth_event_valid(strum_midi_event_valid),
+        .synth_event_brightness(strum_midi_event_brightness),
+        .synth_event_ready(strum_midi_event_ready),
         .strum_mode(strum_mode),
         .strum_interval_ms(strum_interval_ms),
         .strum_gate_ms(strum_gate_ms),
@@ -271,6 +283,25 @@ module top (
         .held_note_count(held_note_count),
         .strum_active(strum_active)
     );
+
+    // UART playback is injected after the guitar-strum controller.  This
+    // means a PC song remains ordinary note playback even if the hardware
+    // keyboard is currently in strum mode.  Live USB events get priority so
+    // keys, MODE volume and the performance controls remain responsive even
+    // during dense PC playback.  A UART event is held until the live-input
+    // slot is free, therefore the lower priority source is not discarded.
+    assign synth_midi_event_data = strum_midi_event_valid
+                                 ? strum_midi_event_data
+                                 : uart_midi_event_data;
+    assign synth_midi_event_valid = strum_midi_event_valid
+                                  | uart_midi_event_valid;
+    assign synth_midi_event_brightness = strum_midi_event_valid
+                                       ? strum_midi_event_brightness
+                                       : uart_midi_event_brightness;
+    assign strum_midi_event_ready = synth_midi_event_ready
+                                  & strum_midi_event_valid;
+    assign uart_midi_event_ready = synth_midi_event_ready
+                                 & ~strum_midi_event_valid;
 
     midi_poly_synth #(.VOICE_COUNT(8)) u_midi_poly_synth (
         .clk(clk),

@@ -9,6 +9,7 @@
 | 阶段 | 启动文件 | 用途 |
 |---|---|---|
 | FPGA音色编辑 | `run_harmonic_editor.bat` | 编辑四基准谐波、幅度ADSR与Pitch包络，试听并通过UART发送 |
+| MIDI演奏器 | `run_uart_midi_player.bat` | 通过串口播放标准MIDI曲目、全音域可视琴键与鼠标试音 |
 | 阶段一 | `run_instrument_analyzer.bat` | 分析一个真实乐器单音，观察热力图、32谐波绝对幅度和绝对衰减 |
 | 阶段二 | `run_timbre_builder.bat` | 同时分析C2/C3/C4/C6，分离总包络和相对谐波衰减，A/B试听并导出FPGA参数 |
 
@@ -25,6 +26,9 @@
 - `additive_uart_protocol.py`：UART数据包和参数换算；
 - `generate_additive_tables.py`、`generate_midi_phase_table.py`：生成FPGA初始化表；
 - `uart_synth_control.py`：命令行UART调试工具；
+- `uart_midi_player.py`：全音域MIDI文件播放器；读取歌曲的速度变化、音符、力度和延音踏板，通过UART实时送入FPGA；
+- `midi_player_core.py`：把多轨MIDI合并为绝对时间事件，处理速度变化、移调和力度；
+- `midi_library/`：授权信息明确的内置示例以及用户自备MIDI的默认目录；
 - `test_*.py`：参数提取单元测试；
 - `audiofiles/`：用户自己的参考录音，不属于程序依赖。
 
@@ -73,3 +77,17 @@ R_k(t) = H_k(t) / G(t)
 - 试听时下方16根只读柱按照`初始幅度×单谐波独立衰减×ADSR`实时变化，纵轴在一次试听内固定，不会因每帧自动缩放而掩盖真实衰减。
 
 默认Pitch表全部为0半音，因此未编辑时不会改变原音高。当前25K资源较紧，先使用单活动表；迁移Mega60K后可增加双缓冲和原子切换。
+
+## 串口MIDI演奏器
+
+先重新综合并烧录包含UART MIDI命令的本工程，再运行`run_uart_midi_player.bat`。选择与BL616调试串口对应的COM口、连接，然后载入曲目播放。
+
+稳定性注意：播放器只显示硬件USB串口并过滤Windows蓝牙虚拟COM口，也绝不自动选中第一个端口。请手动选择“之前用串口助手能看到USB Host心跳”的板载COM口。打开前DTR/RTS保持为低，软件不再创建后台串口读取线程，停止播放也不会关闭串口；只有点击“断开”、退出或发生写入错误才会在互斥保护下关闭一次句柄。连接时会主动发送普通演奏模式，避免上一次扫弦设置让实体琴键只记录和弦而不发声。
+
+- 上位机发送完整MIDI音符号0～127，不受实体25键键盘当前`OCT`档位限制；
+- 实体键盘仍可同时连接USB Host，`MODE`旋钮发送的CC20继续作为板端总音量；
+- 实体键盘事件在硬件仲裁中优先于上位机歌曲，MODE与现场按键不会被密集歌曲数据长期堵塞；
+- 软件保留MIDI力度和CC64延音踏板，并提供速度、±24半音移调、力度比例、忽略鼓组通道；
+- 暂停、停止、跳转和退出均发送Sustain Off与All Notes Off，避免挂音；
+- 当前硬件合成器为8复音。曲目峰值复音超过8时，软件会提示，板端按照现有声部抢占规则播放；
+- 首次运行前执行`install_python_requirements.bat`安装`mido`和`pyserial`。

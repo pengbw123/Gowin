@@ -19,6 +19,9 @@
 //   42:       end-of-update marker (reserved for future double buffering)
 //   50:       strum {mode:u8, interval_ms:u16, gate_ms:u16,
 //                    velocity_speed:u8, velocity_brightness:u8, reserved:u8}
+//   30:       injected MIDI event {status:u8, data1:u8, data2:u8,
+//                                 brightness:u8, reserved[4]}
+//             valid is held until midi_event_ready acknowledges the event.
 module synth_uart_control #(
     parameter [31:0] AMP_ATTACK_SAMPLES      = 32'd1,
     parameter [31:0] AMP_ATTACK_PHASE_INC    = 32'hFFFFFFFF,
@@ -61,6 +64,11 @@ module synth_uart_control #(
     output reg  [15:0] strum_gate_ms,
     output reg  [6:0]  strum_velocity_speed_depth,
     output reg  [6:0]  strum_velocity_brightness_depth,
+
+    output reg  [31:0] midi_event_data,
+    output reg         midi_event_valid,
+    output reg  [6:0]  midi_event_brightness,
+    input  wire        midi_event_ready,
 
     output reg         packet_received,
     output reg         packet_error
@@ -127,6 +135,9 @@ module synth_uart_control #(
             strum_gate_ms             <= 16'd120;
             strum_velocity_speed_depth <= 7'd80;
             strum_velocity_brightness_depth <= 7'd96;
+            midi_event_data            <= 32'd0;
+            midi_event_valid           <= 1'b0;
+            midi_event_brightness      <= 7'd0;
             packet_received          <= 1'b0;
             packet_error             <= 1'b0;
         end else begin
@@ -135,6 +146,9 @@ module synth_uart_control #(
             harmonic_commit      <= 1'b0;
             packet_received      <= 1'b0;
             packet_error         <= 1'b0;
+
+            if (midi_event_valid && midi_event_ready)
+                midi_event_valid <= 1'b0;
 
             if (rx_valid) begin
                 case (parser_state)
@@ -192,6 +206,28 @@ module synth_uart_control #(
                                         envelope_write_table   <= payload[1:0];
                                         envelope_write_address <= payload[15:8];
                                         envelope_write_value   <= payload[31:16];
+                                    end else begin
+                                        packet_error <= 1'b1;
+                                    end
+                                end
+                                8'h30: begin
+                                    // The synthesizer uses the same byte
+                                    // layout as the USB-MIDI mailbox:
+                                    // [23:16]=status, [14:8]=data1,
+                                    // [6:0]=data2.  A ready/valid handshake
+                                    // prevents a UART note from being lost
+                                    // while the render engine is busy.
+                                    if (!midi_event_valid || midi_event_ready) begin
+                                        midi_event_data <= {
+                                            8'd0,
+                                            payload[7:0],
+                                            1'b0, payload[14:8],
+                                            1'b0, payload[22:16]
+                                        };
+                                        midi_event_brightness <=
+                                            (payload[31:24] > 8'd127)
+                                            ? 7'd127 : payload[30:24];
+                                        midi_event_valid <= 1'b1;
                                     end else begin
                                         packet_error <= 1'b1;
                                     end

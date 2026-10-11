@@ -28,6 +28,7 @@ CMD_SUSTAIN = 0x12
 CMD_RELEASE = 0x13
 CMD_PITCH_ENVELOPE_TIME = 0x14
 CMD_ENVELOPE_TABLE_POINT = 0x20
+CMD_MIDI_EVENT = 0x30
 CMD_HARMONIC_AMPLITUDE = 0x40
 CMD_HARMONIC_DECAY = 0x41
 CMD_COMMIT = 0x42
@@ -102,6 +103,40 @@ def harmonic_decay_packet(anchor: int, harmonic: int, decay_ms: float) -> bytes:
 
 def commit_packet() -> bytes:
     return make_packet(CMD_COMMIT)
+
+
+def midi_event_packet(
+    status: int,
+    data1: int = 0,
+    data2: int = 0,
+    brightness: int | None = None,
+) -> bytes:
+    """Build one real-time MIDI event for the FPGA synthesizer.
+
+    ``status`` is the complete MIDI status byte, so the caller may preserve
+    the original channel.  The current synthesizer accepts all channels and
+    uses Note On, Note Off, CC20 master volume, CC64 sustain and CC123 all
+    notes off.  Brightness defaults to velocity for ordinary note events.
+    """
+    if not 0x80 <= status <= 0xFF:
+        raise ValueError("MIDI status must be between 0x80 and 0xFF")
+    if not 0 <= data1 <= 127 or not 0 <= data2 <= 127:
+        raise ValueError("MIDI data bytes must be between 0 and 127")
+    if brightness is None:
+        brightness = data2
+    if not 0 <= brightness <= 127:
+        raise ValueError("brightness must be between 0 and 127")
+    payload = bytes((status, data1, data2, brightness, 0, 0, 0, 0))
+    return make_packet(CMD_MIDI_EVENT, payload)
+
+
+def all_notes_off_packets() -> list[bytes]:
+    """Release sustain and all voices on all sixteen MIDI channels."""
+    packets: list[bytes] = []
+    for channel in range(16):
+        packets.append(midi_event_packet(0xB0 | channel, 64, 0))
+        packets.append(midi_event_packet(0xB0 | channel, 123, 0))
+    return packets
 
 
 def envelope_table_packet(table: int, address: int, value: int) -> bytes:

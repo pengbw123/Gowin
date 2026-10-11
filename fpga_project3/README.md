@@ -120,11 +120,13 @@ cd tools
 - 实时预览当前基准的单周期加法合成波形，并显示幅度和、峰值、RMS及削顶警告；
 - 当前基准的16根相对衰减柱可分别拖动，也可以输入精确时间常数；C2/C3/C4/C6共保存4×16项，0表示该谐波不额外衰减；
 - 保存、载入和UART发送始终使用原始4×16独立表，不再经过全局频率曲线近似；
-- Attack、Decay、Sustain、Release；
+- 可编辑Attack、Decay、Release三张256点幅度曲线，以及A/D/S/R时间和电平；
+- 可编辑256点Pitch包络及总遍历时间，纵轴可选±0.5、±1、±2、±12、±24半音，并试听幅度、谐波衰减和Pitch共同作用后的声音；
+- 可切换查看单段曲线或包含Note Off位置的完整ADSR总形状；试听时16根谐波柱按固定纵轴实时显示各分量的实际衰减；
 - JSON保存/载入；
-- 一次发送全部134个配置包（含1个演奏模式包），也可只发送扫弦设置。
+- 一次发送全部谐波、两组包络和演奏设置，也可只发送扫弦设置或包络。
 
-参数表直接写入活动表，但正在发声的音符已保存自己的谐波状态，因此不会被突然改写。发送完成后重新按下琴键，即可听到新音色。发送约需0.14秒，发送期间不要演奏新音符。
+谐波参数写入活动配置后对下一次Note On生效；四张包络表使用可写单缓冲RAM，完整下载约1.1秒。发送包络前应先松开全部琴键，避免正在读表时出现一部分旧曲线、一部分新曲线。发送完成后重新按键即可听到新包络。
 
 波形预览显示的是16个谐波在按键初始时刻的`sum(Ak*sin(k*x))`，不包含ADSR和各谐波随时间的独立衰减。整体倍率会直接改写界面中的16个幅度，放大后若复合波峰值超过1，曲线变红并提示可能削顶。JSON直接保存64项独立衰减时间；阶段二导出的四基准参数可原样载入和发送。
 
@@ -194,7 +196,7 @@ cd tools
 命令行示例：
 
 ```powershell
-python .\tools\uart_synth_control.py COM11 send-preset .\tools\pianotone2.json
+python .\tools\uart_synth_control.py COM11 send-preset .\tools\instrument_4anchor_relative_decay.json
 python .\tools\uart_synth_control.py COM11 harmonic-amp C4 3 0.25 --commit
 python .\tools\uart_synth_control.py COM11 harmonic-decay C4 3 1800 --commit
 python .\tools\uart_synth_control.py COM11 adsr 30 500 0.18 800
@@ -215,18 +217,23 @@ CHECKSUM = XOR(CMD, DATA0..DATA7)
 | `11` | Decay采样数和曲线相位步进 |
 | `12` | Sustain Q0.16 |
 | `13` | Release采样数和曲线相位步进 |
+| `14` | Pitch包络采样数和曲线相位步进 |
+| `20` | 包络表号、地址和16位表值；表号0/1/2/3对应A/D/R/Pitch |
 | `40` | 基准、谐波序号、幅度Q1.15 |
 | `41` | 基准、谐波序号、衰减系数Q0.24 |
 | `42` | 本轮参数发送结束标记 |
 
 ## 默认音色文件
 
-- `tools/pianotone2.json`：上电及上位机默认音色，幅度已按四个基准分别安全归一化，ADSR为30/500/0.18/800 ms；
+- `tools/instrument_4anchor_relative_decay.json`：当前上电及上位机默认音色，由四段真实乐器单音分析得到C2/C3/C4/C6的幅度和相对谐波衰减；缺少的曲线字段会补为A/D/R曲率0.9/0.6/0.3和水平Pitch包络；
+- `tools/pianotone2.json`：保留的上一版安全归一化钢琴预设，可手动载入比较；
 - `tools/additive_piano_4anchor.json`：另一组可载入的加法合成预设；
 - `src/generated/additive_sine_2048.mem`：2048点正弦ROM；
 - `src/generated/additive_harmonic_amp.mem`：4 × 16默认幅度；
 - `src/generated/additive_harmonic_decay.mem`：4 × 16默认衰减系数；
-- `tools/generate_additive_tables.py`：从JSON重新生成三份初始化文件。
+- `src/generated/tone_amp_*_curve.mem`：Attack、Decay、Release三张256点幅度曲线初值；
+- `src/generated/pitch_envelope_ratio.mem`：256点Q4.12 Pitch频率倍率初值；
+- `tools/generate_additive_tables.py`：从JSON重新生成全部初始化表和定点时间参数。
 
 修改默认JSON后重新生成：
 
@@ -255,12 +262,12 @@ python .\tools\generate_additive_tables.py
 
 | 资源 | 使用量 |
 | --- | ---: |
-| Logic | 14194 / 23040，62% |
-| Register | 5564 / 23280，24% |
-| BSRAM | 47 / 56，84% |
-| DSP | 24.5 / 28，88% |
+| Logic | 14230 / 23040，62% |
+| Register | 5896 / 23280，26% |
+| BSRAM | 51 / 56，92% |
+| DSP | 26.5 / 28，95% |
 
-50 MHz音频域实际Fmax为50.024 MHz，47.917 MHz USB域实际Fmax为63.369 MHz，TNS为0，无Setup/Hold违例。扫弦的和弦选择与释放槽分配已分成三级寄存处理；力度速度与亮度采用移位加法，未新增DSP。当前最慢路径仍在原合成器的动态声部索引到滑音相位步进寄存器，而不是毫秒级扫弦调度。生成文件为 `impl/pnr/fpga_project.fs`。25K余量已经很小，后续大型效果扩展应迁移到60K。
+50 MHz音频域实际Fmax为50.041 MHz，47.917 MHz USB域实际Fmax为62.950 MHz，TNS为0，无Setup/Hold违例。四张包络数组均被综合为片上RAM；Pitch倍率增加一段定点乘法。当前最慢路径仍在动态声部索引到滑音相位步进逻辑。生成文件为`impl/pnr/fpga_project.fs`。25K已接近BRAM与DSP上限，动态滤波、视频显示和更大规模复音应迁移到60K。
 
 ## 长时间演奏的数字自恢复
 

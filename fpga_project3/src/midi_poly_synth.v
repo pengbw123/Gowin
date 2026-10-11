@@ -27,6 +27,12 @@ module midi_poly_synth #(
     input  wire [15:0]        amp_sustain_q16,
     input  wire [31:0]        amp_release_samples,
     input  wire [31:0]        amp_release_phase_inc,
+    input  wire [31:0]        pitch_envelope_phase_inc,
+
+    input  wire               envelope_write_valid,
+    input  wire [1:0]         envelope_write_table,
+    input  wire [7:0]         envelope_write_address,
+    input  wire [15:0]        envelope_write_value,
 
     input  wire               harmonic_write_valid,
     input  wire               harmonic_write_decay,
@@ -75,6 +81,8 @@ module midi_poly_synth #(
     localparam [4:0] ENGINE_GLIDE_CALC         = 5'd19;
     localparam [4:0] ENGINE_PITCH_MULT         = 5'd20;
     localparam [4:0] ENGINE_INIT_BRIGHTNESS    = 5'd21;
+    localparam [4:0] ENGINE_ENVELOPE_FETCH     = 5'd22;
+    localparam [4:0] ENGINE_PITCH_ENV_MULT     = 5'd23;
 
     localparam [6:0] DEFAULT_MASTER_VOLUME =
         ((`TONE_MASTER_GAIN_Q15 * 32'd127) + 32'd16384) >> 15;
@@ -84,6 +92,9 @@ module midi_poly_synth #(
     reg [15:0] attack_curve [0:255];
     reg [15:0] decay_curve [0:255];
     reg [15:0] release_curve [0:255];
+    // Q4.12 frequency ratio.  0x1000 means no pitch shift; the editor uses
+    // a safe -24..+24-semitone range (0.25x..4x).
+    reg [15:0] pitch_envelope_ratio [0:255];
     // Q1.16 ratios covering -2..+2 semitones in 1/128-semitone steps.
     // Pitch bend and vibrato share this ROM, so only one phase-increment
     // multiplier is needed for all voices.
@@ -101,6 +112,7 @@ module midi_poly_synth #(
         $readmemh(`TONE_AMP_ATTACK_CURVE_MEM, attack_curve);
         $readmemh(`TONE_AMP_DECAY_CURVE_MEM, decay_curve);
         $readmemh(`TONE_AMP_RELEASE_CURVE_MEM, release_curve);
+        $readmemh(`TONE_PITCH_ENVELOPE_MEM, pitch_envelope_ratio);
         $readmemb("src/generated/pitch_ratio_q16.mem", pitch_ratio_table);
         $readmemh("src/generated/additive_harmonic_amp.mem", harmonic_amp_active);
         $readmemh("src/generated/additive_harmonic_decay.mem", harmonic_decay_active);
@@ -142,6 +154,7 @@ module midi_poly_synth #(
     reg [31:0]          envelope_phase [0:VOICE_COUNT-1];
     reg [15:0]          envelope_start [0:VOICE_COUNT-1];
     reg [15:0]          envelope_level [0:VOICE_COUNT-1];
+    reg [31:0]          pitch_envelope_phase [0:VOICE_COUNT-1];
 
     // Q1.31 level and Q0.24 exponential decay alpha for every partial.
     reg [31:0] partial_level [0:VOICE_COUNT*HARMONIC_COUNT-1];
@@ -162,6 +175,31 @@ module midi_poly_synth #(
     reg [3:0] audible_voice_count;
     reg signed [38:0] mix_accumulator;
     reg signed [31:0] voice_harmonic_accumulator;
+
+    // These four initialised memories are writable at run time.  Reads are
+    // synchronous so Gowin can infer RAM instead of expanding 1024 points
+    // into flip-flops.  Update curves while no note is sounding to avoid a
+    // deliberate live edit changing the middle of an existing envelope.
+    wire [7:0] envelope_curve_address = envelope_phase[voice_index][31:24];
+    wire [7:0] pitch_envelope_address = pitch_envelope_phase[voice_index][31:24];
+    reg [15:0] attack_curve_read;
+    reg [15:0] decay_curve_read;
+    reg [15:0] release_curve_read;
+    reg [15:0] pitch_envelope_ratio_read;
+    always @(posedge clk) begin
+        attack_curve_read <= attack_curve[envelope_curve_address];
+        decay_curve_read <= decay_curve[envelope_curve_address];
+        release_curve_read <= release_curve[envelope_curve_address];
+        pitch_envelope_ratio_read <= pitch_envelope_ratio[pitch_envelope_address];
+        if (envelope_write_valid) begin
+            case (envelope_write_table)
+                2'd0: attack_curve[envelope_write_address] <= envelope_write_value;
+                2'd1: decay_curve[envelope_write_address] <= envelope_write_value;
+                2'd2: release_curve[envelope_write_address] <= envelope_write_value;
+                2'd3: pitch_envelope_ratio[envelope_write_address] <= envelope_write_value;
+            endcase
+        end
+    end
 
     reg [31:0] fundamental_phase_work;
     reg [31:0] fundamental_increment_work;
@@ -230,11 +268,17 @@ module midi_poly_synth #(
     wire [31:0] modulated_increment = modulated_increment_wide[32]
         ? 32'hffffffff : modulated_increment_wide[31:0];
 
-    wire [7:0] envelope_curve_address = envelope_phase[voice_index][31:24];
-    wire [15:0] selected_curve =
-        (envelope_state[voice_index] == ENV_ATTACK)  ? attack_curve[envelope_curve_address] :
-        (envelope_state[voice_index] == ENV_DECAY)   ? decay_curve[envelope_curve_address] :
-        (envelope_state[voice_index] == ENV_RELEASE) ? release_curve[envelope_curve_address] : 16'd0;
+    reg [47:0] pitch_envelope_product_reg;
+    wire [35:0] pitch_enveloped_increment_wide =
+        pitch_envelope_product_reg[47:12];
+    wire [31:0] pitch_enveloped_increment =
+        (pitch_enveloped_increment_wide[35:32] != 0)
+        ? 32'hffffffff : pitch_enveloped_increment_wide[31:0];
+
+    wire [15:0] selected_curve_read =
+        (envelope_state[voice_index] == ENV_ATTACK)  ? attack_curve_read :
+        (envelope_state[voice_index] == ENV_DECAY)   ? decay_curve_read :
+        (envelope_state[voice_index] == ENV_RELEASE) ? release_curve_read : 16'd0;
 
     reg [15:0] render_envelope_level;
     reg [15:0] envelope_curve_reg;
@@ -242,6 +286,7 @@ module midi_poly_synth #(
     reg [2:0]  envelope_state_reg;
     reg        envelope_gate_reg;
     reg [15:0] calculated_envelope_level;
+    reg [15:0] pitch_envelope_ratio_reg;
 
     wire [16:0] attack_range = 17'd65535 - {1'b0, envelope_start_reg};
     wire [32:0] attack_product = attack_range * envelope_curve_reg;
@@ -540,6 +585,7 @@ module midi_poly_synth #(
             harmonic_increment_work <= 36'd0;
             pitch_base_increment_reg <= 32'd0;
             pitch_product_reg   <= 49'd0;
+            pitch_envelope_product_reg <= 48'd0;
             vibrato_phase       <= 32'd0;
             pitch_ratio_address <= 9'd256;
             pitch_ratio_q16     <= 17'd65536;
@@ -558,6 +604,7 @@ module midi_poly_synth #(
             envelope_state_reg <= ENV_IDLE;
             envelope_gate_reg <= 1'b0;
             calculated_envelope_level <= 16'd0;
+            pitch_envelope_ratio_reg <= 16'h1000;
             allocation_index      <= 3'd0;
             allocation_scan_index <= 3'd0;
             same_note_found       <= 1'b0;
@@ -597,6 +644,7 @@ module midi_poly_synth #(
                 envelope_phase[i]        <= 32'd0;
                 envelope_start[i]        <= 16'd0;
                 envelope_level[i]        <= 16'd0;
+                pitch_envelope_phase[i]  <= 32'd0;
             end
         end else begin
             partial_level_read <= partial_level[partial_ram_address];
@@ -729,6 +777,9 @@ module midi_poly_synth #(
                         {1'b0, allocation_velocity, 8'd0} +
                         {8'd0, allocation_velocity, 1'b0};
                     voice_phase_increment[allocation_index] <= allocation_target_increment;
+                    // A pitch envelope is a one-shot modulation started by
+                    // every Note On, including a legato note transition.
+                    pitch_envelope_phase[allocation_index] <= 32'd0;
                     last_voice_index <= allocation_index;
                     if (allocation_legato) begin
                         voice_glide_step[allocation_index] <=
@@ -831,12 +882,20 @@ module midi_poly_synth #(
                             audible_voice_count <= audible_voice_count + 1'b1;
                         render_envelope_level <= envelope_level[voice_index];
                         render_velocity_gain <= voice_velocity_gain[voice_index];
-                        envelope_curve_reg <= selected_curve;
                         envelope_start_reg <= envelope_start[voice_index];
                         envelope_state_reg <= envelope_state[voice_index];
                         envelope_gate_reg <= voice_gate[voice_index];
-                        engine_state <= ENGINE_ENVELOPE_CALC;
+                        engine_state <= ENGINE_ENVELOPE_FETCH;
                     end
+                end
+
+                // One wait/capture stage accounts for the synchronous curve
+                // RAMs.  Each active voice therefore receives the A/D/R and
+                // pitch value belonging to its own independent phase.
+                ENGINE_ENVELOPE_FETCH: begin
+                    envelope_curve_reg <= selected_curve_read;
+                    pitch_envelope_ratio_reg <= pitch_envelope_ratio_read;
+                    engine_state <= ENGINE_ENVELOPE_CALC;
                 end
 
                 ENGINE_ENVELOPE_CALC: begin
@@ -919,14 +978,30 @@ module midi_poly_synth #(
 
                 ENGINE_PITCH_MULT: begin
                     pitch_product_reg <= pitch_base_increment_reg * pitch_ratio_q16;
+                    engine_state <= ENGINE_PITCH_ENV_MULT;
+                end
+
+                ENGINE_PITCH_ENV_MULT: begin
+                    pitch_envelope_product_reg <=
+                        modulated_increment * pitch_envelope_ratio_reg;
                     engine_state <= ENGINE_PITCH_APPLY;
                 end
 
                 ENGINE_PITCH_APPLY: begin
-                    fundamental_increment_work <= modulated_increment;
-                    harmonic_increment_work <= {4'd0, modulated_increment};
+                    fundamental_increment_work <= pitch_enveloped_increment;
+                    harmonic_increment_work <= {4'd0, pitch_enveloped_increment};
                     voice_phase[voice_index] <= voice_phase[voice_index] +
-                                                modulated_increment;
+                                                pitch_enveloped_increment;
+                    if (pitch_envelope_phase[voice_index] == 32'hffffffff) begin
+                        // Hold the final table value until the ADSR makes the
+                        // voice inactive.  If ADSR finishes first, this voice
+                        // is no longer rendered and the pitch envelope ends.
+                        pitch_envelope_phase[voice_index] <= 32'hffffffff;
+                    end else begin
+                        pitch_envelope_phase[voice_index] <= saturated_phase_add(
+                            pitch_envelope_phase[voice_index],
+                            pitch_envelope_phase_inc);
+                    end
                     engine_state <= ENGINE_SINE_ADDRESS;
                 end
 

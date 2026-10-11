@@ -11,6 +11,9 @@
 // Commands:
 //   10/11/13: ADSR attack/decay/release {samples:u32, phase_inc:u32}
 //   12:       ADSR sustain Q0.16 in DATA0..1
+//   14:       pitch-envelope time {samples:u32, phase_inc:u32}
+//   20:       envelope RAM point {table:u8, address:u8, value:u16}
+//             table 0/1/2 = amp A/D/R progress, table 3 = pitch Q4.12 ratio
 //   40:       harmonic amplitude {anchor:u8, harmonic:u8, amp_q15:u16}
 //   41:       harmonic decay {anchor:u8, harmonic:u8, alpha_q24:u24}
 //   42:       end-of-update marker (reserved for future double buffering)
@@ -23,7 +26,9 @@ module synth_uart_control #(
     parameter [31:0] AMP_DECAY_PHASE_INC     = 32'hFFFFFFFF,
     parameter [15:0] AMP_SUSTAIN_Q16         = 16'd32768,
     parameter [31:0] AMP_RELEASE_SAMPLES     = 32'd1,
-    parameter [31:0] AMP_RELEASE_PHASE_INC   = 32'hFFFFFFFF
+    parameter [31:0] AMP_RELEASE_PHASE_INC   = 32'hFFFFFFFF,
+    parameter [31:0] PITCH_ENVELOPE_SAMPLES   = 32'd1,
+    parameter [31:0] PITCH_ENVELOPE_PHASE_INC = 32'hFFFFFFFF
 ) (
     input  wire        clk,
     input  wire        reset_n,
@@ -36,6 +41,13 @@ module synth_uart_control #(
     output reg  [15:0] amp_sustain_q16,
     output reg  [31:0] amp_release_samples,
     output reg  [31:0] amp_release_phase_inc,
+    output reg  [31:0] pitch_envelope_samples,
+    output reg  [31:0] pitch_envelope_phase_inc,
+
+    output reg         envelope_write_valid,
+    output reg  [1:0]  envelope_write_table,
+    output reg  [7:0]  envelope_write_address,
+    output reg  [15:0] envelope_write_value,
 
     output reg         harmonic_write_valid,
     output reg         harmonic_write_decay,
@@ -96,6 +108,13 @@ module synth_uart_control #(
             amp_sustain_q16          <= AMP_SUSTAIN_Q16;
             amp_release_samples      <= AMP_RELEASE_SAMPLES;
             amp_release_phase_inc    <= AMP_RELEASE_PHASE_INC;
+            pitch_envelope_samples   <= PITCH_ENVELOPE_SAMPLES;
+            pitch_envelope_phase_inc <= PITCH_ENVELOPE_PHASE_INC;
+
+            envelope_write_valid     <= 1'b0;
+            envelope_write_table     <= 2'd0;
+            envelope_write_address   <= 8'd0;
+            envelope_write_value     <= 16'd0;
 
             harmonic_write_valid     <= 1'b0;
             harmonic_write_decay     <= 1'b0;
@@ -112,6 +131,7 @@ module synth_uart_control #(
             packet_error             <= 1'b0;
         end else begin
             harmonic_write_valid <= 1'b0;
+            envelope_write_valid <= 1'b0;
             harmonic_commit      <= 1'b0;
             packet_received      <= 1'b0;
             packet_error         <= 1'b0;
@@ -160,6 +180,21 @@ module synth_uart_control #(
                                 8'h13: begin
                                     amp_release_samples   <= (payload[31:0] == 0) ? 32'd1 : payload[31:0];
                                     amp_release_phase_inc <= payload[63:32];
+                                end
+                                8'h14: begin
+                                    pitch_envelope_samples <=
+                                        (payload[31:0] == 0) ? 32'd1 : payload[31:0];
+                                    pitch_envelope_phase_inc <= payload[63:32];
+                                end
+                                8'h20: begin
+                                    if (payload[7:0] < 4) begin
+                                        envelope_write_valid   <= 1'b1;
+                                        envelope_write_table   <= payload[1:0];
+                                        envelope_write_address <= payload[15:8];
+                                        envelope_write_value   <= payload[31:16];
+                                    end else begin
+                                        packet_error <= 1'b1;
+                                    end
                                 end
                                 8'h40, 8'h41: begin
                                     if ((payload[7:0] < 4) && (payload[15:8] < 16)) begin

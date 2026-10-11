@@ -177,6 +177,12 @@ module top (
     wire [15:0] amp_sustain_q16;
     wire [31:0] amp_release_samples;
     wire [31:0] amp_release_phase_inc;
+    wire [31:0] pitch_envelope_samples;
+    wire [31:0] pitch_envelope_phase_inc;
+    wire        envelope_write_valid;
+    wire [1:0]  envelope_write_table;
+    wire [7:0]  envelope_write_address;
+    wire [15:0] envelope_write_value;
     wire        harmonic_write_valid;
     wire        harmonic_write_decay;
     wire [1:0]  harmonic_write_anchor;
@@ -198,7 +204,9 @@ module top (
         .AMP_DECAY_PHASE_INC(`TONE_AMP_DECAY_PHASE_INC),
         .AMP_SUSTAIN_Q16(`TONE_AMP_SUSTAIN_Q16),
         .AMP_RELEASE_SAMPLES(`TONE_AMP_RELEASE_SAMPLES),
-        .AMP_RELEASE_PHASE_INC(`TONE_AMP_RELEASE_PHASE_INC)
+        .AMP_RELEASE_PHASE_INC(`TONE_AMP_RELEASE_PHASE_INC),
+        .PITCH_ENVELOPE_SAMPLES(`TONE_PITCH_ENVELOPE_SAMPLES),
+        .PITCH_ENVELOPE_PHASE_INC(`TONE_PITCH_ENVELOPE_PHASE_INC)
     ) u_synth_uart_control (
         .clk(clk),
         .reset_n(audio_reset_n),
@@ -210,6 +218,12 @@ module top (
         .amp_sustain_q16(amp_sustain_q16),
         .amp_release_samples(amp_release_samples),
         .amp_release_phase_inc(amp_release_phase_inc),
+        .pitch_envelope_samples(pitch_envelope_samples),
+        .pitch_envelope_phase_inc(pitch_envelope_phase_inc),
+        .envelope_write_valid(envelope_write_valid),
+        .envelope_write_table(envelope_write_table),
+        .envelope_write_address(envelope_write_address),
+        .envelope_write_value(envelope_write_value),
         .harmonic_write_valid(harmonic_write_valid),
         .harmonic_write_decay(harmonic_write_decay),
         .harmonic_write_anchor(harmonic_write_anchor),
@@ -273,6 +287,11 @@ module top (
         .amp_sustain_q16(amp_sustain_q16),
         .amp_release_samples(amp_release_samples),
         .amp_release_phase_inc(amp_release_phase_inc),
+        .pitch_envelope_phase_inc(pitch_envelope_phase_inc),
+        .envelope_write_valid(envelope_write_valid),
+        .envelope_write_table(envelope_write_table),
+        .envelope_write_address(envelope_write_address),
+        .envelope_write_value(envelope_write_value),
         .harmonic_write_valid(harmonic_write_valid),
         .harmonic_write_decay(harmonic_write_decay),
         .harmonic_write_anchor(harmonic_write_anchor),

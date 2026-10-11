@@ -9,6 +9,14 @@ import time
 from pathlib import Path
 from typing import Iterable
 
+from envelope_tools import (
+    CURVE_POINTS,
+    normalise_envelopes,
+    pitch_ratio_q12,
+    q16_curve,
+    stage_timing,
+)
+
 
 SAMPLE_RATE = 48_828.125
 ANCHOR_NAMES = ("C2", "C3", "C4", "C6")
@@ -18,10 +26,17 @@ CMD_ATTACK = 0x10
 CMD_DECAY = 0x11
 CMD_SUSTAIN = 0x12
 CMD_RELEASE = 0x13
+CMD_PITCH_ENVELOPE_TIME = 0x14
+CMD_ENVELOPE_TABLE_POINT = 0x20
 CMD_HARMONIC_AMPLITUDE = 0x40
 CMD_HARMONIC_DECAY = 0x41
 CMD_COMMIT = 0x42
 CMD_STRUM_CONFIG = 0x50
+
+TABLE_AMP_ATTACK = 0
+TABLE_AMP_DECAY = 1
+TABLE_AMP_RELEASE = 2
+TABLE_PITCH_RATIO = 3
 
 DEFAULT_PERFORMANCE = {
     "mode": "normal",
@@ -42,10 +57,7 @@ def make_packet(command: int, payload: bytes = bytes(8)) -> bytes:
 
 
 def timing_packet(command: int, milliseconds: float) -> bytes:
-    if not 0.1 <= milliseconds <= 60_000:
-        raise ValueError("ADSR time must be between 0.1 and 60000 ms")
-    samples = max(1, round(milliseconds * SAMPLE_RATE / 1000.0))
-    phase_increment = 0xFFFFFFFF if samples <= 1 else round(0xFFFFFFFF / (samples - 1))
+    samples, phase_increment = stage_timing(milliseconds)
     return make_packet(command, struct.pack("<II", samples, min(0xFFFFFFFF, phase_increment)))
 
 
@@ -92,6 +104,43 @@ def commit_packet() -> bytes:
     return make_packet(CMD_COMMIT)
 
 
+def envelope_table_packet(table: int, address: int, value: int) -> bytes:
+    if not 0 <= table <= TABLE_PITCH_RATIO:
+        raise ValueError("envelope table id must be 0..3")
+    if not 0 <= address < CURVE_POINTS:
+        raise ValueError("envelope table address must be 0..255")
+    if not 0 <= value <= 0xFFFF:
+        raise ValueError("envelope table value must be 0..65535")
+    payload = bytearray(8)
+    payload[0] = table
+    payload[1] = address
+    struct.pack_into("<H", payload, 2, value)
+    return make_packet(CMD_ENVELOPE_TABLE_POINT, bytes(payload))
+
+
+def envelope_packets(preset: dict) -> list[bytes]:
+    tone = normalise_envelopes(preset)
+    adsr = tone["adsr"]
+    pitch = tone["pitch_envelope"]
+    packets = [
+        timing_packet(CMD_ATTACK, float(adsr["attack_ms"])),
+        timing_packet(CMD_DECAY, float(adsr["decay_ms"])),
+        sustain_packet(float(adsr["sustain"])),
+        timing_packet(CMD_RELEASE, float(adsr["release_ms"])),
+        timing_packet(CMD_PITCH_ENVELOPE_TIME, float(pitch["time_ms"])),
+    ]
+    tables = (
+        q16_curve(adsr["attack_table"]),
+        q16_curve(adsr["decay_table"]),
+        q16_curve(adsr["release_table"]),
+        pitch_ratio_q12(pitch["points_semitones"]),
+    )
+    for table_id, values in enumerate(tables):
+        for address, value in enumerate(values):
+            packets.append(envelope_table_packet(table_id, address, value))
+    return packets
+
+
 def strum_packet(performance: dict) -> bytes:
     mode = str(performance.get("mode", "normal")).lower()
     if mode not in ("normal", "strum"):
@@ -116,6 +165,7 @@ def strum_packet(performance: dict) -> bytes:
 
 
 def validate_preset(preset: dict) -> None:
+    preset = normalise_envelopes(preset)
     anchors = preset.get("anchors", [])
     if len(anchors) != 4:
         raise ValueError("preset must contain four anchors")
@@ -135,30 +185,31 @@ def validate_preset(preset: dict) -> None:
     for name in ("attack_ms", "decay_ms", "sustain", "release_ms"):
         if name not in adsr:
             raise ValueError(f"preset ADSR is missing {name}")
+    for name in ("attack_table", "decay_table", "release_table"):
+        if len(adsr.get(name, [])) != CURVE_POINTS:
+            raise ValueError(f"preset ADSR {name} must contain 256 points")
+    pitch = preset.get("pitch_envelope", {})
+    stage_timing(float(pitch.get("time_ms", 0.0)))
+    pitch_ratio_q12(pitch.get("points_semitones", []))
     strum_packet(preset.get("performance", DEFAULT_PERFORMANCE))
 
 
 def preset_packets(preset: dict) -> list[bytes]:
-    validate_preset(preset)
-    adsr = preset["adsr"]
-    packets = [
-        timing_packet(CMD_ATTACK, float(adsr["attack_ms"])),
-        timing_packet(CMD_DECAY, float(adsr["decay_ms"])),
-        sustain_packet(float(adsr["sustain"])),
-        timing_packet(CMD_RELEASE, float(adsr["release_ms"])),
-    ]
-    for anchor_index, anchor in enumerate(preset["anchors"]):
+    tone = normalise_envelopes(preset)
+    validate_preset(tone)
+    packets = envelope_packets(tone)
+    for anchor_index, anchor in enumerate(tone["anchors"]):
         for harmonic_index, value in enumerate(anchor["amplitudes"]):
             packets.append(amplitude_packet(anchor_index, harmonic_index, float(value)))
         for harmonic_index, value in enumerate(anchor["decay_ms"]):
             packets.append(harmonic_decay_packet(anchor_index, harmonic_index, float(value)))
     packets.append(commit_packet())
-    packets.append(strum_packet(preset.get("performance", DEFAULT_PERFORMANCE)))
+    packets.append(strum_packet(tone.get("performance", DEFAULT_PERFORMANCE)))
     return packets
 
 
 def load_preset(path: Path | str) -> dict:
-    preset = json.loads(Path(path).read_text(encoding="utf-8"))
+    preset = normalise_envelopes(json.loads(Path(path).read_text(encoding="utf-8")))
     validate_preset(preset)
     return preset
 

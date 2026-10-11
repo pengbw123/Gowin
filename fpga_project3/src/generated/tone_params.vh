@@ -32,4 +32,7 @@
 `define TONE_FILTER_ATTACK_CURVE_MEM "src/generated/tone_filter_attack_curve.mem"
 `define TONE_FILTER_DECAY_CURVE_MEM "src/generated/tone_filter_decay_curve.mem"
 `define TONE_FILTER_RELEASE_CURVE_MEM "src/generated/tone_filter_release_curve.mem"
+`define TONE_PITCH_ENVELOPE_SAMPLES 32'd12207
+`define TONE_PITCH_ENVELOPE_PHASE_INC 32'h00055E81
+`define TONE_PITCH_ENVELOPE_MEM "src/generated/pitch_envelope_ratio.mem"
 `endif

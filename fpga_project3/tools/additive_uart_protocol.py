@@ -33,6 +33,13 @@ CMD_HARMONIC_AMPLITUDE = 0x40
 CMD_HARMONIC_DECAY = 0x41
 CMD_COMMIT = 0x42
 CMD_STRUM_CONFIG = 0x50
+CMD_FILTER_POINT = 0x51
+CMD_FILTER_TIME = 0x52
+CMD_FILTER_CONFIG = 0x53
+
+FILTER_POINTS = 64
+FILTER_MIN_HZ = 80.0
+FILTER_MAX_HZ = 12_000.0
 
 TABLE_AMP_ATTACK = 0
 TABLE_AMP_DECAY = 1
@@ -91,6 +98,12 @@ def decay_ms_to_q24(decay_ms: float) -> int:
 
 
 def harmonic_decay_packet(anchor: int, harmonic: int, decay_ms: float) -> bytes:
+    """Legacy packet retained for loading older presets.
+
+    The current FPGA architecture deliberately ignores per-partial decay and
+    uses the dynamic filter envelope instead, which saves one multiply for
+    every rendered harmonic.
+    """
     if not 0 <= anchor < 4 or not 0 <= harmonic < 16:
         raise ValueError("anchor must be 0..3 and harmonic must be 0..15")
     payload = bytearray(8)
@@ -99,6 +112,83 @@ def harmonic_decay_packet(anchor: int, harmonic: int, decay_ms: float) -> bytes:
     rate = decay_ms_to_q24(decay_ms)
     payload[2:5] = rate.to_bytes(3, "little")
     return make_packet(CMD_HARMONIC_DECAY, bytes(payload))
+
+
+def cutoff_hz_to_code(frequency_hz: float) -> int:
+    frequency_hz = max(FILTER_MIN_HZ, min(FILTER_MAX_HZ, float(frequency_hz)))
+    position = math.log(frequency_hz / FILTER_MIN_HZ) / math.log(FILTER_MAX_HZ / FILTER_MIN_HZ)
+    return max(0, min(255, round(position * 255.0)))
+
+
+def filter_point_packet(anchor: int, address: int, frequency_hz: float) -> bytes:
+    if not 0 <= anchor < 4 or not 0 <= address < FILTER_POINTS:
+        raise ValueError("filter anchor must be 0..3 and address must be 0..63")
+    payload = bytearray(8)
+    payload[0] = anchor
+    payload[1] = address
+    payload[2] = cutoff_hz_to_code(frequency_hz)
+    return make_packet(CMD_FILTER_POINT, bytes(payload))
+
+
+def filter_time_packet(anchor: int, milliseconds: float) -> bytes:
+    if not 0 <= anchor < 4:
+        raise ValueError("filter anchor must be 0..3")
+    _samples, phase_increment = stage_timing(milliseconds)
+    payload = bytearray(8)
+    payload[0] = anchor
+    struct.pack_into("<I", payload, 1, min(0xFFFFFFFF, phase_increment))
+    return make_packet(CMD_FILTER_TIME, bytes(payload))
+
+
+def filter_config_packet(enabled: bool, slope_db_oct: int) -> bytes:
+    payload = bytearray(8)
+    payload[0] = 1 if enabled else 0
+    payload[1] = 1 if int(slope_db_oct) >= 12 else 0
+    return make_packet(CMD_FILTER_CONFIG, bytes(payload))
+
+
+def _default_filter_anchor(index: int) -> dict:
+    start_hz = (7200.0, 8200.0, 9500.0, 11_000.0)[index]
+    end_hz = (550.0, 700.0, 900.0, 1400.0)[index]
+    values = []
+    for point in range(FILTER_POINTS):
+        x = point / (FILTER_POINTS - 1)
+        values.append(start_hz * ((end_hz / start_hz) ** (x ** 0.62)))
+    return {"time_ms": 1400.0, "cutoff_hz": values}
+
+
+def normalise_dynamic_filter(preset: dict) -> dict:
+    raw = preset.get("dynamic_filter", {})
+    source_anchors = raw.get("anchors", [])
+    anchors = []
+    for index, (name, note) in enumerate(zip(ANCHOR_NAMES, ANCHOR_MIDI_NOTES)):
+        source = source_anchors[index] if index < len(source_anchors) else _default_filter_anchor(index)
+        points = [float(value) for value in source.get("cutoff_hz", [])]
+        if len(points) != FILTER_POINTS:
+            points = _default_filter_anchor(index)["cutoff_hz"]
+        anchors.append({
+            "name": name,
+            "midi_note": note,
+            "time_ms": max(0.1, float(source.get("time_ms", 1400.0))),
+            "cutoff_hz": [max(FILTER_MIN_HZ, min(FILTER_MAX_HZ, value)) for value in points],
+        })
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "slope_db_oct": 12 if int(raw.get("slope_db_oct", 12)) >= 12 else 6,
+        "anchors": anchors,
+    }
+
+
+def filter_packets(preset: dict) -> list[bytes]:
+    config = normalise_dynamic_filter(preset)
+    packets = [filter_config_packet(config["enabled"], config["slope_db_oct"])]
+    for anchor_index, anchor in enumerate(config["anchors"]):
+        packets.append(filter_time_packet(anchor_index, float(anchor["time_ms"])))
+        packets.extend(
+            filter_point_packet(anchor_index, address, frequency)
+            for address, frequency in enumerate(anchor["cutoff_hz"])
+        )
+    return packets
 
 
 def commit_packet() -> bytes:
@@ -227,6 +317,7 @@ def validate_preset(preset: dict) -> None:
     stage_timing(float(pitch.get("time_ms", 0.0)))
     pitch_ratio_q12(pitch.get("points_semitones", []))
     strum_packet(preset.get("performance", DEFAULT_PERFORMANCE))
+    normalise_dynamic_filter(preset)
 
 
 def preset_packets(preset: dict) -> list[bytes]:
@@ -236,9 +327,8 @@ def preset_packets(preset: dict) -> list[bytes]:
     for anchor_index, anchor in enumerate(tone["anchors"]):
         for harmonic_index, value in enumerate(anchor["amplitudes"]):
             packets.append(amplitude_packet(anchor_index, harmonic_index, float(value)))
-        for harmonic_index, value in enumerate(anchor["decay_ms"]):
-            packets.append(harmonic_decay_packet(anchor_index, harmonic_index, float(value)))
     packets.append(commit_packet())
+    packets.extend(filter_packets(tone))
     packets.append(strum_packet(tone.get("performance", DEFAULT_PERFORMANCE)))
     return packets
 

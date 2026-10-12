@@ -1,6 +1,6 @@
 # 后续功能路线（已确认）
 
-> `fpga_project3` 已完成Pitch Bend、Vibrato、Portamento以及Chorus、Delay、Reverb的第一版RTL；以下内容保留为实板试听后的优化路线。
+> `fpga_project3` 已完成Pitch Bend、Vibrato、Portamento、Chorus、Reverb、12复音双路加法合成和四基准动态低通第一版RTL；Delay已为25K资源优化而移除。以下内容保留为实板试听后的优化路线。
 
 ## 表情控制
 
@@ -17,7 +17,7 @@
 
 ## 数字效果器
 
-- 顺序：合成混音 -> Chorus -> Delay -> Reverb -> 平滑限幅器 -> I2S。
+- 当前顺序：合成混音 -> Chorus -> Reverb -> I2S；Delay以后作为可选效果恢复。
 - Chorus：5～25 ms短延迟受LFO调制，产生多人/多乐器同时演奏的宽厚感。
 - Delay：可调循环延迟和反馈，产生清晰重复回声。
 - Reverb：Schroeder多Comb+All-pass结构，产生房间/大厅空间尾音。
@@ -25,16 +25,17 @@
 
 ## 冲奖版本
 
-- Primer 25K先验证Pitch Bend、Vibrato、Portamento、Pad扫弦和三种效果器。
+- Primer 25K先验证Pitch Bend、Vibrato、Portamento、Pad扫弦、动态低通、Chorus和Reverb。
 - Mega 60K成品升级为单音32个独立加法分量，分量保留独立相位状态。
 - 钢琴使用32分量加法合成；吉他使用Karplus-Strong物理建模；支持独立旁路与现场频谱测试模式。
+- Mega 60K增加共享渲染器的双音质模式：高复音模式使用动态低通和较高声部上限；精细音色模式启用每谐波独立衰减并降低声部上限。切换时先All Notes Off、等待引擎空闲并清除声部状态，不综合两套完整合成器。
 
 ## 已确认的后续开发顺序（2026-10-11）
 
 1. 先完成当前Primer 25K吉他扫弦版本的实板验证和稳定性调试；在此之前不继续叠加大型算法。
 2. 将稳定的USB-MIDI、复音分配、I2S和基础音色链路移植到Tang Mega 60K。
 3. 增加Pitch Envelope，支持鼓、贝斯、铜管和拨弦起音的自动音高变化。
-4. 增加每复音动态多模式滤波器及Filter Envelope，支持LP/HP/BP/Notch、截止频率、共振、力度映射和键位跟踪。
+4. 已完成每复音动态LP及Filter Envelope；迁移60K后扩展HP/BP/Notch、共振、力度映射和键位跟踪。
 5. 在总混音后增加三段参数EQ、压缩/限幅和软削波；保留Chorus、Delay、Reverb的独立旁路和A/B试听。
 6. 为吉他模式增加六弦Karplus-Strong物理建模；Pad 1/Pad 2继续作为下扫/上扫触发，力度控制音量、亮度和部分扫弦速度。
 7. 实现32复音带限波表播放。四基准、32谐波参数仍作为音色描述，可生成分音区波表，避免32复音×32谐波全部实时累加带来的运算压力。
@@ -50,4 +51,4 @@
 - 当前A/D/R默认曲线沿用“钢琴（合成）7”的曲率：Attack 0.9、Decay 0.6、Release 0.3，每段256点Q0.16；三张表已经由只读ROM升级为UART可写RAM。
 - 已加入256点Pitch Envelope RAM和独立遍历时间：Note On从表头开始，走完后保持末值，ADSR提前结束时随声部结束；默认表为0半音。
 - 音色编辑器已经可以编辑、试听、保存、UART下载两组包络，也可导出为下次综合使用的上电初值。
-- 当前25K采用单活动RAM，实时下载前应松开琴键；迁移Mega60K后再加入双缓冲曲线表、原子切换以及动态滤波包络。
+- 当前25K采用单活动RAM，实时下载前应松开琴键；动态滤波包络已实现，迁移Mega60K后再加入双缓冲曲线表和原子切换。

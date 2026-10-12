@@ -35,4 +35,18 @@
 `define TONE_PITCH_ENVELOPE_SAMPLES 32'd12207
 `define TONE_PITCH_ENVELOPE_PHASE_INC 32'h00055E81
 `define TONE_PITCH_ENVELOPE_MEM "src/generated/pitch_envelope_ratio.mem"
+`define TONE_QUARTER_SINE_MEM "src/generated/additive_sine_quarter_512.mem"
+`define TONE_FILTER_ENVELOPE_MEM "src/generated/filter_envelope_4anchor.mem"
+`define TONE_FILTER_ALPHA_MEM "src/generated/filter_alpha_256.mem"
+`define TONE_DYNAMIC_FILTER_ENABLE 1'b1
+`define TONE_DYNAMIC_FILTER_TWO_POLE 1'b1
+`define TONE_FILTER_0_SAMPLES 32'd68359
+`define TONE_FILTER_0_PHASE_INC 32'h0000F56E
+`define TONE_FILTER_1_SAMPLES 32'd68359
+`define TONE_FILTER_1_PHASE_INC 32'h0000F56E
+`define TONE_FILTER_2_SAMPLES 32'd68359
+`define TONE_FILTER_2_PHASE_INC 32'h0000F56E
+`define TONE_FILTER_3_SAMPLES 32'd68359
+`define TONE_FILTER_3_PHASE_INC 32'h0000F56E
+`define TONE_AMP_ENVELOPE_TABLE_MEM "src/generated/tone_amp_envelope_tables.mem"
 `endif

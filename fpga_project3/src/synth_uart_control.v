@@ -19,6 +19,9 @@
 //   42:       end-of-update marker (reserved for future double buffering)
 //   50:       strum {mode:u8, interval_ms:u16, gate_ms:u16,
 //                    velocity_speed:u8, velocity_brightness:u8, reserved:u8}
+//   51:       filter-envelope point {anchor:u8, address:u8, cutoff_code:u8}
+//   52:       filter-envelope time {anchor:u8, phase_inc:u32, reserved[3]}
+//   53:       dynamic filter {enable:u8, two_pole:u8, reserved[6]}
 //   30:       injected MIDI event {status:u8, data1:u8, data2:u8,
 //                                 brightness:u8, reserved[4]}
 //             valid is held until midi_event_ready acknowledges the event.
@@ -31,7 +34,9 @@ module synth_uart_control #(
     parameter [31:0] AMP_RELEASE_SAMPLES     = 32'd1,
     parameter [31:0] AMP_RELEASE_PHASE_INC   = 32'hFFFFFFFF,
     parameter [31:0] PITCH_ENVELOPE_SAMPLES   = 32'd1,
-    parameter [31:0] PITCH_ENVELOPE_PHASE_INC = 32'hFFFFFFFF
+    parameter [31:0] PITCH_ENVELOPE_PHASE_INC = 32'hFFFFFFFF,
+    parameter        FILTER_ENABLE             = 1'b1,
+    parameter        FILTER_TWO_POLE           = 1'b1
 ) (
     input  wire        clk,
     input  wire        reset_n,
@@ -58,6 +63,16 @@ module synth_uart_control #(
     output reg  [3:0]  harmonic_write_index,
     output reg  [23:0] harmonic_write_value,
     output reg         harmonic_commit,
+
+    output reg         filter_write_valid,
+    output reg  [1:0]  filter_write_anchor,
+    output reg  [5:0]  filter_write_address,
+    output reg  [7:0]  filter_write_value,
+    output reg         filter_time_write_valid,
+    output reg  [1:0]  filter_time_write_anchor,
+    output reg  [31:0] filter_time_write_phase_inc,
+    output reg         filter_enable,
+    output reg         filter_two_pole,
 
     output reg         strum_mode,
     output reg  [15:0] strum_interval_ms,
@@ -130,6 +145,15 @@ module synth_uart_control #(
             harmonic_write_index     <= 4'd0;
             harmonic_write_value     <= 24'd0;
             harmonic_commit          <= 1'b0;
+            filter_write_valid        <= 1'b0;
+            filter_write_anchor       <= 2'd0;
+            filter_write_address      <= 6'd0;
+            filter_write_value        <= 8'd0;
+            filter_time_write_valid   <= 1'b0;
+            filter_time_write_anchor  <= 2'd0;
+            filter_time_write_phase_inc <= 32'd0;
+            filter_enable             <= FILTER_ENABLE;
+            filter_two_pole           <= FILTER_TWO_POLE;
             strum_mode                <= 1'b0;
             strum_interval_ms         <= 16'd18;
             strum_gate_ms             <= 16'd120;
@@ -144,6 +168,8 @@ module synth_uart_control #(
             harmonic_write_valid <= 1'b0;
             envelope_write_valid <= 1'b0;
             harmonic_commit      <= 1'b0;
+            filter_write_valid   <= 1'b0;
+            filter_time_write_valid <= 1'b0;
             packet_received      <= 1'b0;
             packet_error         <= 1'b0;
 
@@ -260,6 +286,29 @@ module synth_uart_control #(
                                     strum_velocity_brightness_depth <=
                                         (payload[55:48] > 127) ? 7'd127
                                                                : payload[54:48];
+                                end
+                                8'h51: begin
+                                    if ((payload[7:0] < 4) && (payload[15:8] < 64)) begin
+                                        filter_write_valid   <= 1'b1;
+                                        filter_write_anchor  <= payload[1:0];
+                                        filter_write_address <= payload[13:8];
+                                        filter_write_value   <= payload[23:16];
+                                    end else begin
+                                        packet_error <= 1'b1;
+                                    end
+                                end
+                                8'h52: begin
+                                    if (payload[7:0] < 4) begin
+                                        filter_time_write_valid <= 1'b1;
+                                        filter_time_write_anchor <= payload[1:0];
+                                        filter_time_write_phase_inc <= payload[39:8];
+                                    end else begin
+                                        packet_error <= 1'b1;
+                                    end
+                                end
+                                8'h53: begin
+                                    filter_enable   <= payload[0];
+                                    filter_two_pole <= payload[8];
                                 end
                                 default: packet_error <= 1'b1;
                             endcase

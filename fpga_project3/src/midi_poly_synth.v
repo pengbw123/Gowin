@@ -1,16 +1,16 @@
 `include "src/generated/tone_params.vh"
 
-// Eight-voice, sixteen-partial additive synthesizer.
+// Sixteen-voice, sixteen-partial additive synthesizer.
 //
 // Each MIDI note owns an independent phase, ADSR state, velocity and sixteen
-// decaying harmonic levels.  A single sine ROM and arithmetic pipeline are
-// time-multiplexed across all 8 x 16 partials.  Four timbre anchors
+// harmonic amplitudes.  A dual-lane arithmetic pipeline is time-multiplexed
+// across all voices. Four timbre and dynamic-filter anchors
 // (C2/C3/C4/C6)
 // are interpolated when a note starts. Notes below/above that range clamp to
 // the nearest anchor. Harmonics above 0.45 * sample rate are muted to prevent
 // aliasing.
 module midi_poly_synth #(
-    parameter integer VOICE_COUNT = 8
+    parameter integer VOICE_COUNT = 16
 ) (
     input  wire               clk,
     input  wire               reset_n,
@@ -41,13 +41,23 @@ module midi_poly_synth #(
     input  wire [23:0]        harmonic_write_value,
     input  wire               harmonic_commit,
 
+    input  wire               filter_write_valid,
+    input  wire [1:0]         filter_write_anchor,
+    input  wire [5:0]         filter_write_address,
+    input  wire [7:0]         filter_write_value,
+    input  wire               filter_time_write_valid,
+    input  wire [1:0]         filter_time_write_anchor,
+    input  wire [31:0]        filter_time_write_phase_inc,
+    input  wire               filter_enable,
+    input  wire               filter_two_pole,
+
     input  wire [13:0]        pitch_bend,
     input  wire [6:0]         vibrato_depth,
     input  wire [6:0]         vibrato_rate,
     input  wire [6:0]         portamento_time,
 
     output reg signed [15:0]  sample_out,
-    output reg [3:0]          active_voice_count
+    output reg [4:0]          active_voice_count
 );
 
     localparam integer HARMONIC_COUNT = 16;
@@ -83,17 +93,25 @@ module midi_poly_synth #(
     localparam [4:0] ENGINE_INIT_BRIGHTNESS    = 5'd21;
     localparam [4:0] ENGINE_ENVELOPE_FETCH     = 5'd22;
     localparam [4:0] ENGINE_PITCH_ENV_MULT     = 5'd23;
+    localparam [4:0] ENGINE_GLIDE_APPLY        = 5'd24;
+    localparam [4:0] ENGINE_ENVELOPE_WAIT      = 5'd25;
+    localparam [4:0] ENGINE_FILTER_INTERPOLATE = 5'd26;
+    localparam [4:0] ENGINE_FILTER_ALPHA_WAIT  = 5'd27;
+    localparam [4:0] ENGINE_FILTER_1_MULT      = 5'd28;
+    localparam [4:0] ENGINE_FILTER_1_APPLY     = 5'd29;
+    localparam [4:0] ENGINE_FILTER_2_MULT      = 5'd30;
+    localparam [4:0] ENGINE_FILTER_2_APPLY     = 5'd31;
 
     localparam [6:0] DEFAULT_MASTER_VOLUME =
         ((`TONE_MASTER_GAIN_Q15 * 32'd127) + 32'd16384) >> 15;
 
-    reg signed [15:0] sine_table [0:2047];
+    // Two physical copies give the dual harmonic lane one read port each.
+    reg signed [15:0] sine_quarter_a [0:511];
+    reg signed [15:0] sine_quarter_b [0:511];
     reg [31:0] midi_phase_increment [0:127];
-    reg [15:0] attack_curve [0:255];
-    reg [15:0] decay_curve [0:255];
-    reg [15:0] release_curve [0:255];
-    // Q4.12 frequency ratio.  0x1000 means no pitch shift; the editor uses
-    // a safe -24..+24-semitone range (0.25x..4x).
+    // Attack/decay/release share one 768x16 BSRAM. Pitch keeps one independent
+    // 256x16 BSRAM so both values can be fetched in the same engine cycle.
+    reg [15:0] amp_envelope_table [0:767];
     reg [15:0] pitch_envelope_ratio [0:255];
     // Q1.16 ratios covering -2..+2 semitones in 1/128-semitone steps.
     // Pitch bend and vibrato share this ROM, so only one phase-increment
@@ -104,38 +122,55 @@ module midi_poly_synth #(
     // private partial state at Note On, so UART edits affect newly triggered
     // notes without disturbing notes that are already sounding.
     reg [15:0] harmonic_amp_active [0:63];
-    reg [23:0] harmonic_decay_active [0:63];
+
+    // Four 64-point log-cutoff envelopes.  A value of 0..255 addresses a
+    // logarithmic alpha LUT spanning 80 Hz..12 kHz.
+    reg [7:0] filter_envelope_a [0:255];
+    reg [7:0] filter_envelope_b [0:255];
+    reg [15:0] filter_alpha_table [0:255];
+    reg [31:0] filter_anchor_phase_inc [0:3];
 
     initial begin
-        $readmemh("src/generated/additive_sine_2048.mem", sine_table);
+        $readmemh(`TONE_QUARTER_SINE_MEM, sine_quarter_a);
+        $readmemh(`TONE_QUARTER_SINE_MEM, sine_quarter_b);
         $readmemh("src/generated/midi_phase_inc.mem", midi_phase_increment);
-        $readmemh(`TONE_AMP_ATTACK_CURVE_MEM, attack_curve);
-        $readmemh(`TONE_AMP_DECAY_CURVE_MEM, decay_curve);
-        $readmemh(`TONE_AMP_RELEASE_CURVE_MEM, release_curve);
+        $readmemh(`TONE_AMP_ENVELOPE_TABLE_MEM, amp_envelope_table);
         $readmemh(`TONE_PITCH_ENVELOPE_MEM, pitch_envelope_ratio);
         $readmemb("src/generated/pitch_ratio_q16.mem", pitch_ratio_table);
         $readmemh("src/generated/additive_harmonic_amp.mem", harmonic_amp_active);
-        $readmemh("src/generated/additive_harmonic_decay.mem", harmonic_decay_active);
+        $readmemh(`TONE_FILTER_ENVELOPE_MEM, filter_envelope_a);
+        $readmemh(`TONE_FILTER_ENVELOPE_MEM, filter_envelope_b);
+        $readmemh(`TONE_FILTER_ALPHA_MEM, filter_alpha_table);
+        filter_anchor_phase_inc[0] = `TONE_FILTER_0_PHASE_INC;
+        filter_anchor_phase_inc[1] = `TONE_FILTER_1_PHASE_INC;
+        filter_anchor_phase_inc[2] = `TONE_FILTER_2_PHASE_INC;
+        filter_anchor_phase_inc[3] = `TONE_FILTER_3_PHASE_INC;
     end
 
     wire [5:0] harmonic_write_address =
         {harmonic_write_anchor, harmonic_write_index};
     reg [5:0] harmonic_read_address;
     reg [15:0] harmonic_amp_read;
-    reg [23:0] harmonic_decay_read;
     always @(posedge clk) begin
         // One deterministic synchronous read port is used for both anchors.
         // The previous code indexed the same table at two unrelated addresses
         // in one cycle.  That construct cannot map to a single-port BSRAM and
         // caused non-C notes (which need interpolation) to receive bad data.
         harmonic_amp_read <= harmonic_amp_active[harmonic_read_address];
-        harmonic_decay_read <= harmonic_decay_active[harmonic_read_address];
         if (harmonic_write_valid) begin
-            if (harmonic_write_decay)
-                harmonic_decay_active[harmonic_write_address] <= harmonic_write_value;
-            else
+            if (!harmonic_write_decay)
                 harmonic_amp_active[harmonic_write_address] <= harmonic_write_value[15:0];
         end
+        if (filter_write_valid)
+            begin
+                filter_envelope_a[{filter_write_anchor, filter_write_address}] <=
+                    filter_write_value;
+                filter_envelope_b[{filter_write_anchor, filter_write_address}] <=
+                    filter_write_value;
+            end
+        if (filter_time_write_valid)
+            filter_anchor_phase_inc[filter_time_write_anchor] <=
+                filter_time_write_phase_inc;
     end
     wire unused_harmonic_commit = harmonic_commit;
 
@@ -147,8 +182,6 @@ module midi_poly_synth #(
     reg [31:0]          voice_phase [0:VOICE_COUNT-1];
     reg [31:0]          voice_phase_increment [0:VOICE_COUNT-1];
     reg [31:0]          voice_current_increment [0:VOICE_COUNT-1];
-    reg [31:0]          voice_glide_step [0:VOICE_COUNT-1];
-    reg                 voice_glide_up [0:VOICE_COUNT-1];
     reg [2:0]           envelope_state [0:VOICE_COUNT-1];
     reg [31:0]          envelope_count [0:VOICE_COUNT-1];
     reg [31:0]          envelope_phase [0:VOICE_COUNT-1];
@@ -156,9 +189,10 @@ module midi_poly_synth #(
     reg [15:0]          envelope_level [0:VOICE_COUNT-1];
     reg [31:0]          pitch_envelope_phase [0:VOICE_COUNT-1];
 
-    // Q1.31 level and Q0.24 exponential decay alpha for every partial.
-    reg [31:0] partial_level [0:VOICE_COUNT*HARMONIC_COUNT-1];
-    reg [23:0] partial_decay [0:VOICE_COUNT*HARMONIC_COUNT-1];
+    // Static Q1.15 partial amplitudes copied/interpolated at Note On. Spectral
+    // evolution is handled by the much cheaper per-voice dynamic filter.
+    reg [15:0] partial_amplitude_a [0:VOICE_COUNT*HARMONIC_COUNT-1];
+    reg [15:0] partial_amplitude_b [0:VOICE_COUNT*HARMONIC_COUNT-1];
 
     reg sustain_pedal;
     reg sample_pending;
@@ -169,35 +203,36 @@ module midi_poly_synth #(
 
     reg [4:0] engine_state;
     reg [15:0] engine_watchdog;
-    reg [2:0] voice_index;
+    reg [3:0] voice_index;
     reg [3:0] harmonic_index;
     reg [3:0] init_harmonic_index;
-    reg [3:0] audible_voice_count;
+    reg [4:0] audible_voice_count;
     reg signed [38:0] mix_accumulator;
     reg signed [31:0] voice_harmonic_accumulator;
 
-    // These four initialised memories are writable at run time.  Reads are
-    // synchronous so Gowin can infer RAM instead of expanding 1024 points
-    // into flip-flops.  Update curves while no note is sounding to avoid a
-    // deliberate live edit changing the middle of an existing envelope.
-    wire [7:0] envelope_curve_address = envelope_phase[voice_index][31:24];
-    wire [7:0] pitch_envelope_address = pitch_envelope_phase[voice_index][31:24];
-    reg [15:0] attack_curve_read;
-    reg [15:0] decay_curve_read;
-    reg [15:0] release_curve_read;
+    // The packed envelope RAM has two synchronous read ports: amplitude and
+    // pitch can therefore be fetched together without four separate BSRAMs.
+    reg [31:0] render_envelope_count;
+    reg [31:0] render_envelope_phase;
+    reg [31:0] render_pitch_envelope_phase;
+    reg [2:0]  envelope_state_reg;
+    wire [7:0] envelope_curve_address = render_envelope_phase[31:24];
+    wire [7:0] pitch_envelope_address = render_pitch_envelope_phase[31:24];
+    wire [9:0] amplitude_curve_address = {
+        (envelope_state_reg == ENV_ATTACK) ? 2'd0 :
+        (envelope_state_reg == ENV_DECAY) ? 2'd1 : 2'd2,
+        envelope_curve_address};
+    reg [15:0] amplitude_curve_read;
     reg [15:0] pitch_envelope_ratio_read;
     always @(posedge clk) begin
-        attack_curve_read <= attack_curve[envelope_curve_address];
-        decay_curve_read <= decay_curve[envelope_curve_address];
-        release_curve_read <= release_curve[envelope_curve_address];
+        amplitude_curve_read <= amp_envelope_table[amplitude_curve_address];
         pitch_envelope_ratio_read <= pitch_envelope_ratio[pitch_envelope_address];
         if (envelope_write_valid) begin
-            case (envelope_write_table)
-                2'd0: attack_curve[envelope_write_address] <= envelope_write_value;
-                2'd1: decay_curve[envelope_write_address] <= envelope_write_value;
-                2'd2: release_curve[envelope_write_address] <= envelope_write_value;
-                2'd3: pitch_envelope_ratio[envelope_write_address] <= envelope_write_value;
-            endcase
+            if (envelope_write_table < 3)
+                amp_envelope_table[{envelope_write_table, envelope_write_address}] <=
+                    envelope_write_value;
+            else
+                pitch_envelope_ratio[envelope_write_address] <= envelope_write_value;
         end
     end
 
@@ -207,29 +242,86 @@ module midi_poly_synth #(
     reg [35:0] harmonic_increment_work;
     reg [31:0] pitch_base_increment_reg;
     reg [48:0] pitch_product_reg;
-    reg [10:0] sine_address;
-    reg signed [15:0] sine_data;
-    reg [2:0] allocation_index;
-    always @(posedge clk)
-        sine_data <= sine_table[sine_address];
+    reg [8:0] sine_address_a;
+    reg [8:0] sine_address_b;
+    reg signed [15:0] sine_data_a;
+    reg signed [15:0] sine_data_b;
+    reg sine_negative_a;
+    reg sine_negative_b;
+    reg [3:0] allocation_index;
 
-    wire [6:0] partial_address = {voice_index, harmonic_index};
-    wire [6:0] init_partial_address = {allocation_index, init_harmonic_index};
+    wire [31:0] harmonic_phase_b = harmonic_phase_work + fundamental_phase_work;
+    wire [8:0] quarter_address_a = harmonic_phase_work[30]
+        ? (9'd511 - harmonic_phase_work[29:21])
+        : harmonic_phase_work[29:21];
+    wire [8:0] quarter_address_b = harmonic_phase_b[30]
+        ? (9'd511 - harmonic_phase_b[29:21])
+        : harmonic_phase_b[29:21];
+    wire signed [15:0] signed_sine_a = sine_negative_a
+        ? -sine_data_a : sine_data_a;
+    wire signed [15:0] signed_sine_b = sine_negative_b
+        ? -sine_data_b : sine_data_b;
 
-    // Synchronous single-port state memories. Every partial of an allocated
-    // voice is initialized before that voice can be rendered, so these RAMs
-    // intentionally need no expensive 128-word reset network.
-    reg [6:0] partial_ram_address;
-    reg [31:0] partial_level_read;
-    reg [23:0] partial_decay_read;
+    wire [7:0] partial_address_a = {voice_index, harmonic_index};
+    wire [7:0] partial_address_b = {voice_index, harmonic_index + 1'b1};
+    wire [7:0] init_partial_address = {allocation_index, init_harmonic_index};
+    reg [15:0] partial_amplitude_read_a;
+    reg [15:0] partial_amplitude_read_b;
+    always @(posedge clk) begin
+        sine_data_a <= sine_quarter_a[sine_address_a];
+        sine_data_b <= sine_quarter_b[sine_address_b];
+        partial_amplitude_read_a <= partial_amplitude_a[partial_address_a];
+        partial_amplitude_read_b <= partial_amplitude_b[partial_address_b];
+    end
 
-    reg signed [32:0] partial_product_reg;
-    reg [55:0] decay_product_reg;
-    wire [31:0] decay_delta = decay_product_reg[55:24];
-    wire signed [31:0] partial_sample = partial_product_reg >>> 15;
-    wire signed [32:0] harmonic_sum_next =
-        $signed({voice_harmonic_accumulator[31], voice_harmonic_accumulator}) +
-        $signed({partial_sample[31], partial_sample});
+    reg signed [32:0] partial_product_a;
+    reg signed [32:0] partial_product_b;
+    wire signed [31:0] partial_sample_a = partial_product_a >>> 15;
+    wire signed [31:0] partial_sample_b = partial_product_b >>> 15;
+    wire signed [33:0] harmonic_sum_next =
+        $signed({{2{voice_harmonic_accumulator[31]}}, voice_harmonic_accumulator}) +
+        $signed({{2{partial_sample_a[31]}}, partial_sample_a}) +
+        $signed({{2{partial_sample_b[31]}}, partial_sample_b});
+
+    // Per-voice dynamic low-pass state.  The second one-pole stage can be
+    // bypassed for a gentler 6 dB/oct response or enabled for 12 dB/oct.
+    reg [31:0] voice_filter_phase [0:VOICE_COUNT-1];
+    reg [31:0] voice_filter_phase_inc [0:VOICE_COUNT-1];
+    reg [1:0] voice_filter_anchor [0:VOICE_COUNT-1];
+    reg [4:0] voice_filter_fraction [0:VOICE_COUNT-1];
+    reg signed [31:0] voice_filter_y1 [0:VOICE_COUNT-1];
+    reg signed [31:0] voice_filter_y2 [0:VOICE_COUNT-1];
+    reg signed [31:0] voice_filter_y1_read;
+    reg signed [31:0] voice_filter_y2_read;
+    reg [7:0] filter_envelope_left_read;
+    reg [7:0] filter_envelope_right_read;
+    reg [7:0] filter_code;
+    reg [7:0] filter_alpha_address;
+    reg [15:0] filter_alpha_read;
+    reg signed [48:0] filter_product_reg;
+    reg signed [31:0] filter_output_sample;
+    wire [1:0] render_filter_right_anchor =
+        (voice_filter_anchor[voice_index] == 2'd3)
+        ? 2'd3 : voice_filter_anchor[voice_index] + 1'b1;
+    wire [5:0] render_filter_point = voice_filter_phase[voice_index][31:26];
+    wire [7:0] render_filter_left_address =
+        {voice_filter_anchor[voice_index], render_filter_point};
+    wire [7:0] render_filter_right_address =
+        {render_filter_right_anchor, render_filter_point};
+    wire signed [32:0] filter_delta = filter_product_reg[48:16];
+    wire signed [32:0] filter_y1_sum =
+        $signed({voice_filter_y1_read[31], voice_filter_y1_read}) +
+        filter_delta;
+    wire signed [32:0] filter_y2_sum =
+        $signed({voice_filter_y2_read[31], voice_filter_y2_read}) +
+        filter_delta;
+    wire signed [31:0] filter_y1_next = filter_y1_sum[31:0];
+    wire signed [31:0] filter_y2_next = filter_y2_sum[31:0];
+    always @(posedge clk) begin
+        filter_envelope_left_read <= filter_envelope_a[render_filter_left_address];
+        filter_envelope_right_read <= filter_envelope_b[render_filter_right_address];
+        filter_alpha_read <= filter_alpha_table[filter_alpha_address];
+    end
 
     reg signed [48:0] envelope_product_reg;
     wire signed [32:0] envelope_scaled = envelope_product_reg >>> 16;
@@ -275,15 +367,11 @@ module midi_poly_synth #(
         (pitch_enveloped_increment_wide[35:32] != 0)
         ? 32'hffffffff : pitch_enveloped_increment_wide[31:0];
 
-    wire [15:0] selected_curve_read =
-        (envelope_state[voice_index] == ENV_ATTACK)  ? attack_curve_read :
-        (envelope_state[voice_index] == ENV_DECAY)   ? decay_curve_read :
-        (envelope_state[voice_index] == ENV_RELEASE) ? release_curve_read : 16'd0;
+    wire [15:0] selected_curve_read = amplitude_curve_read;
 
     reg [15:0] render_envelope_level;
     reg [15:0] envelope_curve_reg;
     reg [15:0] envelope_start_reg;
-    reg [2:0]  envelope_state_reg;
     reg        envelope_gate_reg;
     reg [15:0] calculated_envelope_level;
     reg [15:0] pitch_envelope_ratio_reg;
@@ -391,21 +479,19 @@ module midi_poly_synth #(
         input [15:0] left_value;
         input [15:0] right_value;
         input [4:0] fraction;
-        reg [5:0] left_weight;
-        reg [5:0] right_weight;
-        reg [21:0] left_product;
-        reg [21:0] right_product;
-        reg [22:0] weighted_sum;
+        reg signed [16:0] delta;
+        reg signed [21:0] adjustment;
+        reg signed [22:0] result;
         begin
-            // Use an all-unsigned convex combination.  Besides being easier
-            // to inspect, this cannot wrap when the right anchor is smaller
-            // than the left one (which is common for upper harmonics).
-            right_weight = {1'b0, fraction};
-            left_weight = 6'd32 - right_weight;
-            left_product = left_value * left_weight;
-            right_product = right_value * right_weight;
-            weighted_sum = left_product + right_product;
-            interpolate_u16 = weighted_sum[20:5];
+            delta = $signed({1'b0, right_value}) - $signed({1'b0, left_value});
+            adjustment = 0;
+            if (fraction[0]) adjustment = adjustment + delta;
+            if (fraction[1]) adjustment = adjustment + (delta <<< 1);
+            if (fraction[2]) adjustment = adjustment + (delta <<< 2);
+            if (fraction[3]) adjustment = adjustment + (delta <<< 3);
+            if (fraction[4]) adjustment = adjustment + (delta <<< 4);
+            result = $signed({1'b0, left_value}) + (adjustment >>> 5);
+            interpolate_u16 = result[15:0];
         end
     endfunction
 
@@ -428,20 +514,72 @@ module midi_poly_synth #(
         end
     endfunction
 
+    function [7:0] interpolate_u8;
+        input [7:0] left_value;
+        input [7:0] right_value;
+        input [4:0] fraction;
+        reg signed [8:0] delta;
+        reg signed [13:0] adjustment;
+        reg signed [14:0] result;
+        begin
+            delta = $signed({1'b0, right_value}) - $signed({1'b0, left_value});
+            adjustment = 0;
+            if (fraction[0]) adjustment = adjustment + delta;
+            if (fraction[1]) adjustment = adjustment + (delta <<< 1);
+            if (fraction[2]) adjustment = adjustment + (delta <<< 2);
+            if (fraction[3]) adjustment = adjustment + (delta <<< 3);
+            if (fraction[4]) adjustment = adjustment + (delta <<< 4);
+            result = $signed({1'b0, left_value}) + (adjustment >>> 5);
+            interpolate_u8 = result[7:0];
+        end
+    endfunction
+
+    function [31:0] interpolate_u32;
+        input [31:0] left_value;
+        input [31:0] right_value;
+        input [4:0] fraction;
+        reg signed [32:0] delta;
+        reg signed [37:0] adjustment;
+        reg signed [38:0] result;
+        begin
+            delta = $signed({1'b0, right_value}) - $signed({1'b0, left_value});
+            adjustment = 0;
+            if (fraction[0]) adjustment = adjustment + delta;
+            if (fraction[1]) adjustment = adjustment + (delta <<< 1);
+            if (fraction[2]) adjustment = adjustment + (delta <<< 2);
+            if (fraction[3]) adjustment = adjustment + (delta <<< 3);
+            if (fraction[4]) adjustment = adjustment + (delta <<< 4);
+            result = $signed({1'b0, left_value}) + (adjustment >>> 5);
+            interpolate_u32 = result[31:0];
+        end
+    endfunction
+
     // 0 dB at MIDI volume 127. Gain does not change with voice count, so adding
     // a note cannot cause compressor pumping. Saturation only protects the
     // final I2S boundary from impossible/worst-case in-phase sums.
     function signed [15:0] apply_volume_and_saturate;
         input signed [38:0] value;
         input [6:0] volume;
-        reg signed [46:0] volume_product;
-        reg signed [46:0] scaled;
+        reg signed [40:0] scaled;
         begin
-            volume_product = value * $signed({1'b0, volume});
-            scaled = volume_product >>> 7;
-            if (scaled > 47'sd32767)
+            // Eight monotonic gain bands avoid a wide 39x7 multiplier. The
+            // physical knob still spans 0..127; only its audible gain law is
+            // quantised, which is preferable to spending a scarce DSP here.
+            if (volume == 0)
+                scaled = 0;
+            else case (volume[6:4])
+                3'd0: scaled = value >>> 4;
+                3'd1: scaled = value >>> 3;
+                3'd2: scaled = (value >>> 3) + (value >>> 4);
+                3'd3: scaled = value >>> 2;
+                3'd4: scaled = (value >>> 2) + (value >>> 3);
+                3'd5: scaled = value >>> 1;
+                3'd6: scaled = (value >>> 1) + (value >>> 2);
+                default: scaled = value;
+            endcase
+            if (scaled > 41'sd32767)
                 apply_volume_and_saturate = 16'sd32767;
-            else if (scaled < -47'sd32768)
+            else if (scaled < -41'sd32768)
                 apply_volume_and_saturate = -16'sd32768;
             else
                 apply_volume_and_saturate = scaled[15:0];
@@ -450,13 +588,13 @@ module midi_poly_synth #(
 
     integer i;
     integer key_scan_index;
-    reg [2:0] allocation_scan_index;
+    reg [3:0] allocation_scan_index;
     reg       same_note_found;
-    reg [2:0] same_note_index;
+    reg [3:0] same_note_index;
     reg       free_voice_found;
-    reg [2:0] free_voice_index;
+    reg [3:0] free_voice_index;
     reg [15:0] quietest_level;
-    reg [2:0] quietest_index;
+    reg [3:0] quietest_index;
     reg [6:0] allocation_note;
     reg [6:0] allocation_velocity;
     reg [6:0] allocation_brightness;
@@ -466,33 +604,21 @@ module midi_poly_synth #(
     reg [5:0] init_left_address;
     reg [5:0] init_right_address;
     reg [15:0] init_left_amp;
-    reg [23:0] init_left_decay;
     reg [15:0] init_interpolated_amp;
-    reg [23:0] init_interpolated_decay;
     reg [6:0] master_volume_target;
     reg [6:0] master_volume_current;
     reg [7:0] event_status;
     reg [6:0] event_data1;
     reg [6:0] event_data2;
-    reg [2:0] last_voice_index;
+    reg [3:0] last_voice_index;
     reg allocation_legato;
     reg any_key_down;
     reg [31:0] glide_next_increment;
+    reg [31:0] glide_current_reg;
+    reg [31:0] glide_target_reg;
 
     wire [31:0] allocation_target_increment =
         midi_phase_increment[allocation_note];
-    wire [31:0] legato_start_increment =
-        voice_current_increment[last_voice_index];
-    wire [31:0] allocation_glide_difference =
-        (allocation_target_increment >= legato_start_increment)
-        ? allocation_target_increment - legato_start_increment
-        : legato_start_increment - allocation_target_increment;
-    wire [31:0] allocation_glide_step_shifted =
-        allocation_glide_difference >> portamento_shift(portamento_time);
-    wire [31:0] allocation_glide_step =
-        (allocation_glide_step_shifted == 0) ? 32'd1
-                                             : allocation_glide_step_shifted;
-
     // A soft pick suppresses upper partials while preserving the fundamental.
     // Shift-only gain bands avoid adding a DSP to the already DSP-full 25K.
     reg [1:0] init_brightness_shift;
@@ -538,34 +664,32 @@ module midi_poly_synth #(
                 any_key_down = 1'b1;
 
         if (portamento_time == 0) begin
-            glide_next_increment = voice_phase_increment[voice_index];
-        end else if (voice_glide_up[voice_index]) begin
-            if ((voice_current_increment[voice_index] >=
-                 voice_phase_increment[voice_index]) ||
-                ((voice_phase_increment[voice_index] -
-                  voice_current_increment[voice_index]) <=
-                 voice_glide_step[voice_index]))
-                glide_next_increment = voice_phase_increment[voice_index];
+            glide_next_increment = glide_target_reg;
+        end else if (glide_current_reg < glide_target_reg) begin
+            if ((glide_target_reg - glide_current_reg) <= 32'd1)
+                glide_next_increment = glide_target_reg;
             else
-                glide_next_increment = voice_current_increment[voice_index] +
-                                       voice_glide_step[voice_index];
+                glide_next_increment = glide_current_reg +
+                    (((glide_target_reg - glide_current_reg) >>
+                       portamento_shift(portamento_time)) == 0 ? 32'd1 :
+                     ((glide_target_reg - glide_current_reg) >>
+                       portamento_shift(portamento_time)));
         end else begin
-            if ((voice_current_increment[voice_index] <=
-                 voice_phase_increment[voice_index]) ||
-                ((voice_current_increment[voice_index] -
-                  voice_phase_increment[voice_index]) <=
-                 voice_glide_step[voice_index]))
-                glide_next_increment = voice_phase_increment[voice_index];
+            if ((glide_current_reg - glide_target_reg) <= 32'd1)
+                glide_next_increment = glide_target_reg;
             else
-                glide_next_increment = voice_current_increment[voice_index] -
-                                       voice_glide_step[voice_index];
+                glide_next_increment = glide_current_reg -
+                    (((glide_current_reg - glide_target_reg) >>
+                       portamento_shift(portamento_time)) == 0 ? 32'd1 :
+                     ((glide_current_reg - glide_target_reg) >>
+                       portamento_shift(portamento_time)));
         end
     end
 
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
             sample_out          <= 16'sd0;
-            active_voice_count  <= 4'd0;
+            active_voice_count  <= 5'd0;
             sustain_pedal       <= 1'b0;
             sample_pending      <= 1'b0;
             pending_event       <= 32'd0;
@@ -573,10 +697,10 @@ module midi_poly_synth #(
             event_pending       <= 1'b0;
             engine_state        <= ENGINE_IDLE;
             engine_watchdog     <= 16'd0;
-            voice_index         <= 3'd0;
+            voice_index         <= 4'd0;
             harmonic_index      <= 4'd0;
             init_harmonic_index <= 4'd0;
-            audible_voice_count <= 4'd0;
+            audible_voice_count <= 5'd0;
             mix_accumulator     <= 39'sd0;
             voice_harmonic_accumulator <= 32'sd0;
             fundamental_phase_work <= 32'd0;
@@ -589,12 +713,17 @@ module midi_poly_synth #(
             vibrato_phase       <= 32'd0;
             pitch_ratio_address <= 9'd256;
             pitch_ratio_q16     <= 17'd65536;
-            sine_address        <= 11'd0;
-            partial_ram_address <= 7'd0;
-            partial_level_read  <= 32'd0;
-            partial_decay_read  <= 24'd0;
-            partial_product_reg <= 33'sd0;
-            decay_product_reg   <= 56'd0;
+            sine_address_a      <= 9'd0;
+            sine_address_b      <= 9'd0;
+            sine_negative_a     <= 1'b0;
+            sine_negative_b     <= 1'b0;
+            partial_product_a   <= 33'sd0;
+            partial_product_b   <= 33'sd0;
+            filter_alpha_address <= 8'd0;
+            filter_product_reg  <= 49'sd0;
+            filter_output_sample <= 32'sd0;
+            voice_filter_y1_read <= 32'sd0;
+            voice_filter_y2_read <= 32'sd0;
             envelope_product_reg <= 49'sd0;
             velocity_product_reg <= 50'sd0;
             render_envelope_level <= 16'd0;
@@ -603,16 +732,19 @@ module midi_poly_synth #(
             envelope_start_reg <= 16'd0;
             envelope_state_reg <= ENV_IDLE;
             envelope_gate_reg <= 1'b0;
+            render_envelope_count <= 32'd0;
+            render_envelope_phase <= 32'd0;
+            render_pitch_envelope_phase <= 32'd0;
             calculated_envelope_level <= 16'd0;
             pitch_envelope_ratio_reg <= 16'h1000;
-            allocation_index      <= 3'd0;
-            allocation_scan_index <= 3'd0;
+            allocation_index      <= 4'd0;
+            allocation_scan_index <= 4'd0;
             same_note_found       <= 1'b0;
-            same_note_index       <= 3'd0;
+            same_note_index       <= 4'd0;
             free_voice_found      <= 1'b0;
-            free_voice_index      <= 3'd0;
+            free_voice_index      <= 4'd0;
             quietest_level        <= 16'hffff;
-            quietest_index        <= 3'd0;
+            quietest_index        <= 4'd0;
             allocation_note       <= 7'd0;
             allocation_velocity   <= 7'd0;
             allocation_brightness <= 7'd127;
@@ -620,13 +752,13 @@ module midi_poly_synth #(
             init_anchor_fraction   <= 5'd0;
             harmonic_read_address  <= 6'd0;
             init_left_amp          <= 16'd0;
-            init_left_decay        <= 24'd0;
             init_interpolated_amp  <= 16'd0;
-            init_interpolated_decay <= 24'd0;
             master_volume_target   <= DEFAULT_MASTER_VOLUME;
             master_volume_current  <= DEFAULT_MASTER_VOLUME;
-            last_voice_index       <= 3'd0;
+            last_voice_index       <= 4'd0;
             allocation_legato      <= 1'b0;
+            glide_current_reg      <= 32'd0;
+            glide_target_reg       <= 32'd0;
 
             for (i = 0; i < VOICE_COUNT; i = i + 1) begin
                 voice_active[i]          <= 1'b0;
@@ -637,20 +769,23 @@ module midi_poly_synth #(
                 voice_phase[i]           <= 32'd0;
                 voice_phase_increment[i] <= 32'd0;
                 voice_current_increment[i] <= 32'd0;
-                voice_glide_step[i]      <= 32'd1;
-                voice_glide_up[i]        <= 1'b1;
                 envelope_state[i]        <= ENV_IDLE;
                 envelope_count[i]        <= 32'd0;
                 envelope_phase[i]        <= 32'd0;
                 envelope_start[i]        <= 16'd0;
                 envelope_level[i]        <= 16'd0;
                 pitch_envelope_phase[i]  <= 32'd0;
+                voice_filter_phase[i]    <= 32'd0;
+                voice_filter_phase_inc[i] <= 32'hffffffff;
+                voice_filter_anchor[i]   <= 2'd0;
+                voice_filter_fraction[i] <= 5'd0;
             end
         end else begin
-            partial_level_read <= partial_level[partial_ram_address];
-            partial_decay_read <= partial_decay[partial_ram_address];
-
-            // A complete worst-case 8-voice render takes well below 1000
+            // Synchronous state reads allow the two 16x32 filter histories to
+            // infer compact RAM instead of 1024 resettable flip-flops.
+            voice_filter_y1_read <= voice_filter_y1[voice_index];
+            voice_filter_y2_read <= voice_filter_y2[voice_index];
+            // A complete worst-case 16-voice render remains below 1024
             // clocks.  If the engine fails to revisit IDLE for about 1.3 ms,
             // recover locally instead of leaving the MIDI mailbox and USB
             // firmware blocked until the FPGA is reconfigured.
@@ -691,13 +826,13 @@ module midi_poly_synth #(
                             allocation_legato     <= (portamento_time != 0) &&
                                                      any_key_down &&
                                                      voice_active[last_voice_index];
-                            allocation_scan_index <= 3'd0;
+                            allocation_scan_index <= 4'd0;
                             same_note_found       <= 1'b0;
-                            same_note_index       <= 3'd0;
+                            same_note_index       <= 4'd0;
                             free_voice_found      <= 1'b0;
-                            free_voice_index      <= 3'd0;
+                            free_voice_index      <= 4'd0;
                             quietest_level        <= 16'hffff;
-                            quietest_index        <= 3'd0;
+                            quietest_index        <= 4'd0;
                             engine_state          <= ENGINE_ALLOC_SCAN;
                         end else if (((event_status & 8'hf0) == 8'h80) ||
                                      (((event_status & 8'hf0) == 8'h90) && (event_data2 == 0))) begin
@@ -729,8 +864,8 @@ module midi_poly_synth #(
                         end
                     end else if (sample_pending) begin
                         sample_pending      <= 1'b0;
-                        voice_index         <= 3'd0;
-                        audible_voice_count <= 4'd0;
+                        voice_index         <= 4'd0;
+                        audible_voice_count <= 5'd0;
                         mix_accumulator     <= 39'sd0;
                         engine_state        <= ENGINE_VOICE_PREPARE;
                     end
@@ -780,18 +915,14 @@ module midi_poly_synth #(
                     // A pitch envelope is a one-shot modulation started by
                     // every Note On, including a legato note transition.
                     pitch_envelope_phase[allocation_index] <= 32'd0;
+                    voice_filter_phase[allocation_index] <= 32'd0;
+                    voice_filter_y1[allocation_index] <= 32'sd0;
+                    voice_filter_y2[allocation_index] <= 32'sd0;
                     last_voice_index <= allocation_index;
-                    if (allocation_legato) begin
-                        voice_glide_step[allocation_index] <=
-                            allocation_glide_step;
-                        voice_glide_up[allocation_index] <=
-                            (allocation_target_increment >= legato_start_increment);
-                    end else begin
+                    if (!allocation_legato) begin
                         voice_phase[allocation_index] <= 32'd0;
                         voice_current_increment[allocation_index] <=
                             allocation_target_increment;
-                        voice_glide_step[allocation_index] <= 32'd1;
-                        voice_glide_up[allocation_index] <= 1'b1;
                         envelope_state[allocation_index] <= ENV_ATTACK;
                         envelope_count[allocation_index] <= 32'd0;
                         envelope_phase[allocation_index] <= 32'd0;
@@ -833,7 +964,6 @@ module midi_poly_synth #(
 
                 ENGINE_INIT_LEFT_CAPTURE: begin
                     init_left_amp <= harmonic_amp_read;
-                    init_left_decay <= harmonic_decay_read;
                     harmonic_read_address <= init_right_address;
                     engine_state <= ENGINE_INIT_RIGHT_WAIT;
                 end
@@ -846,20 +976,21 @@ module midi_poly_synth #(
                         init_left_amp,
                         harmonic_amp_read,
                         init_anchor_fraction);
-                    init_interpolated_decay <= interpolate_u24(
-                        init_left_decay,
-                        harmonic_decay_read,
-                        init_anchor_fraction);
                     engine_state <= ENGINE_INIT_BRIGHTNESS;
                 end
 
                 ENGINE_INIT_BRIGHTNESS: begin
-                    partial_level[init_partial_address] <= {
-                        (init_interpolated_amp >> init_brightness_shift),
-                        16'd0};
-                    partial_decay[init_partial_address] <=
-                        init_interpolated_decay;
+                    partial_amplitude_a[init_partial_address] <=
+                        init_interpolated_amp >> init_brightness_shift;
+                    partial_amplitude_b[init_partial_address] <=
+                        init_interpolated_amp >> init_brightness_shift;
                     if (init_harmonic_index == HARMONIC_COUNT - 1) begin
+                        voice_filter_anchor[allocation_index] <= init_anchor_left;
+                        voice_filter_fraction[allocation_index] <= init_anchor_fraction;
+                        voice_filter_phase_inc[allocation_index] <= interpolate_u32(
+                            filter_anchor_phase_inc[init_anchor_left],
+                            filter_anchor_phase_inc[init_anchor_right],
+                            init_anchor_fraction);
                         engine_state <= ENGINE_IDLE;
                     end else begin
                         init_harmonic_index <= init_harmonic_index + 1'b1;
@@ -885,9 +1016,16 @@ module midi_poly_synth #(
                         envelope_start_reg <= envelope_start[voice_index];
                         envelope_state_reg <= envelope_state[voice_index];
                         envelope_gate_reg <= voice_gate[voice_index];
-                        engine_state <= ENGINE_ENVELOPE_FETCH;
+                        render_envelope_count <= envelope_count[voice_index];
+                        render_envelope_phase <= envelope_phase[voice_index];
+                        render_pitch_envelope_phase <=
+                            pitch_envelope_phase[voice_index];
+                        engine_state <= ENGINE_ENVELOPE_WAIT;
                     end
                 end
+
+                ENGINE_ENVELOPE_WAIT:
+                    engine_state <= ENGINE_ENVELOPE_FETCH;
 
                 // One wait/capture stage accounts for the synchronous curve
                 // RAMs.  Each active voice therefore receives the A/D/R and
@@ -919,41 +1057,41 @@ module midi_poly_synth #(
                         case (envelope_state_reg)
                             ENV_ATTACK: begin
                                 envelope_level[voice_index] <= calculated_envelope_level;
-                                if (envelope_count[voice_index] >= amp_attack_samples - 1) begin
+                                if (render_envelope_count >= amp_attack_samples - 1) begin
                                     envelope_level[voice_index] <= 16'hffff;
                                     envelope_state[voice_index] <= ENV_DECAY;
                                     envelope_count[voice_index] <= 32'd0;
                                     envelope_phase[voice_index] <= 32'd0;
                                 end else begin
-                                    envelope_count[voice_index] <= envelope_count[voice_index] + 1'b1;
+                                    envelope_count[voice_index] <= render_envelope_count + 1'b1;
                                     envelope_phase[voice_index] <= saturated_phase_add(
-                                        envelope_phase[voice_index], amp_attack_phase_inc);
+                                        render_envelope_phase, amp_attack_phase_inc);
                                 end
                             end
                             ENV_DECAY: begin
                                 envelope_level[voice_index] <= calculated_envelope_level;
-                                if (envelope_count[voice_index] >= amp_decay_samples - 1) begin
+                                if (render_envelope_count >= amp_decay_samples - 1) begin
                                     envelope_level[voice_index] <= amp_sustain_q16;
                                     envelope_state[voice_index] <= ENV_SUSTAIN;
                                     envelope_count[voice_index] <= 32'd0;
                                     envelope_phase[voice_index] <= 32'd0;
                                 end else begin
-                                    envelope_count[voice_index] <= envelope_count[voice_index] + 1'b1;
+                                    envelope_count[voice_index] <= render_envelope_count + 1'b1;
                                     envelope_phase[voice_index] <= saturated_phase_add(
-                                        envelope_phase[voice_index], amp_decay_phase_inc);
+                                        render_envelope_phase, amp_decay_phase_inc);
                                 end
                             end
                             ENV_SUSTAIN: envelope_level[voice_index] <= amp_sustain_q16;
                             ENV_RELEASE: begin
                                 envelope_level[voice_index] <= calculated_envelope_level;
-                                if (envelope_count[voice_index] >= amp_release_samples - 1) begin
+                                if (render_envelope_count >= amp_release_samples - 1) begin
                                     envelope_level[voice_index] <= 16'd0;
                                     envelope_state[voice_index] <= ENV_IDLE;
                                     voice_active[voice_index] <= 1'b0;
                                 end else begin
-                                    envelope_count[voice_index] <= envelope_count[voice_index] + 1'b1;
+                                    envelope_count[voice_index] <= render_envelope_count + 1'b1;
                                     envelope_phase[voice_index] <= saturated_phase_add(
-                                        envelope_phase[voice_index], amp_release_phase_inc);
+                                        render_envelope_phase, amp_release_phase_inc);
                                 end
                             end
                             default: begin
@@ -971,6 +1109,12 @@ module midi_poly_synth #(
                 end
 
                 ENGINE_GLIDE_CALC: begin
+                    glide_current_reg <= voice_current_increment[voice_index];
+                    glide_target_reg <= voice_phase_increment[voice_index];
+                    engine_state <= ENGINE_GLIDE_APPLY;
+                end
+
+                ENGINE_GLIDE_APPLY: begin
                     voice_current_increment[voice_index] <= glide_next_increment;
                     pitch_base_increment_reg <= glide_next_increment;
                     engine_state <= ENGINE_PITCH_MULT;
@@ -992,22 +1136,24 @@ module midi_poly_synth #(
                     harmonic_increment_work <= {4'd0, pitch_enveloped_increment};
                     voice_phase[voice_index] <= voice_phase[voice_index] +
                                                 pitch_enveloped_increment;
-                    if (pitch_envelope_phase[voice_index] == 32'hffffffff) begin
+                    if (render_pitch_envelope_phase == 32'hffffffff) begin
                         // Hold the final table value until the ADSR makes the
                         // voice inactive.  If ADSR finishes first, this voice
                         // is no longer rendered and the pitch envelope ends.
                         pitch_envelope_phase[voice_index] <= 32'hffffffff;
                     end else begin
                         pitch_envelope_phase[voice_index] <= saturated_phase_add(
-                            pitch_envelope_phase[voice_index],
+                            render_pitch_envelope_phase,
                             pitch_envelope_phase_inc);
                     end
                     engine_state <= ENGINE_SINE_ADDRESS;
                 end
 
                 ENGINE_SINE_ADDRESS: begin
-                    sine_address <= harmonic_phase_work[31:21];
-                    partial_ram_address <= partial_address;
+                    sine_address_a <= quarter_address_a;
+                    sine_address_b <= quarter_address_b;
+                    sine_negative_a <= harmonic_phase_work[31];
+                    sine_negative_b <= harmonic_phase_b[31];
                     engine_state <= ENGINE_SINE_WAIT;
                 end
 
@@ -1015,36 +1161,93 @@ module midi_poly_synth #(
 
                 ENGINE_PARTIAL_MULT: begin
                     if ((harmonic_increment_work < {4'd0, HARMONIC_PHASE_LIMIT}) &&
-                        (partial_level_read[31:16] != 0))
-                        partial_product_reg <= $signed(sine_data) *
-                            $signed({1'b0, partial_level_read[31:16]});
+                        (partial_amplitude_read_a != 0))
+                        partial_product_a <= signed_sine_a *
+                            $signed({1'b0, partial_amplitude_read_a});
                     else
-                        partial_product_reg <= 33'sd0;
-                    decay_product_reg <= partial_level_read * partial_decay_read;
+                        partial_product_a <= 33'sd0;
+                    if (((harmonic_increment_work + {4'd0, fundamental_increment_work}) <
+                         {4'd0, HARMONIC_PHASE_LIMIT}) &&
+                        (partial_amplitude_read_b != 0))
+                        partial_product_b <= signed_sine_b *
+                            $signed({1'b0, partial_amplitude_read_b});
+                    else
+                        partial_product_b <= 33'sd0;
                     engine_state <= ENGINE_PARTIAL_ACCUM;
                 end
 
                 ENGINE_PARTIAL_ACCUM: begin
                     voice_harmonic_accumulator <= harmonic_sum_next[31:0];
-                    if (decay_delta >= partial_level_read)
-                        partial_level[partial_ram_address] <= 32'd0;
-                    else
-                        partial_level[partial_ram_address] <=
-                            partial_level_read - decay_delta;
-
-                    if (harmonic_index == HARMONIC_COUNT - 1) begin
-                        engine_state <= ENGINE_ENV_MULT;
+                    if (harmonic_index >= HARMONIC_COUNT - 2) begin
+                        if (filter_enable)
+                            engine_state <= ENGINE_FILTER_INTERPOLATE;
+                        else begin
+                            filter_output_sample <= harmonic_sum_next[31:0];
+                            engine_state <= ENGINE_ENV_MULT;
+                        end
                     end else begin
-                        harmonic_index <= harmonic_index + 1'b1;
-                        harmonic_phase_work <= harmonic_phase_work + fundamental_phase_work;
+                        harmonic_index <= harmonic_index + 2'd2;
+                        harmonic_phase_work <= harmonic_phase_work +
+                            (fundamental_phase_work << 1);
                         harmonic_increment_work <= harmonic_increment_work +
-                                                   {4'd0, fundamental_increment_work};
+                            ({4'd0, fundamental_increment_work} << 1);
                         engine_state <= ENGINE_SINE_ADDRESS;
                     end
                 end
 
+                ENGINE_FILTER_INTERPOLATE: begin
+                    filter_code <= interpolate_u8(
+                        filter_envelope_left_read,
+                        filter_envelope_right_read,
+                        voice_filter_fraction[voice_index]);
+                    filter_alpha_address <= interpolate_u8(
+                        filter_envelope_left_read,
+                        filter_envelope_right_read,
+                        voice_filter_fraction[voice_index]);
+                    voice_filter_phase[voice_index] <= saturated_phase_add(
+                        voice_filter_phase[voice_index],
+                        voice_filter_phase_inc[voice_index]);
+                    engine_state <= ENGINE_FILTER_ALPHA_WAIT;
+                end
+
+                ENGINE_FILTER_ALPHA_WAIT:
+                    engine_state <= ENGINE_FILTER_1_MULT;
+
+                ENGINE_FILTER_1_MULT: begin
+                    filter_product_reg <=
+                        ($signed(voice_harmonic_accumulator) -
+                         $signed(voice_filter_y1_read)) *
+                        $signed({1'b0, filter_alpha_read});
+                    engine_state <= ENGINE_FILTER_1_APPLY;
+                end
+
+                ENGINE_FILTER_1_APPLY: begin
+                    voice_filter_y1[voice_index] <= filter_y1_next;
+                    filter_output_sample <= filter_y1_next;
+                    if (filter_two_pole)
+                        engine_state <= ENGINE_FILTER_2_MULT;
+                    else begin
+                        filter_output_sample <= filter_y1_next;
+                        engine_state <= ENGINE_ENV_MULT;
+                    end
+                end
+
+                ENGINE_FILTER_2_MULT: begin
+                    filter_product_reg <=
+                        ($signed(filter_output_sample) -
+                         $signed(voice_filter_y2_read)) *
+                        $signed({1'b0, filter_alpha_read});
+                    engine_state <= ENGINE_FILTER_2_APPLY;
+                end
+
+                ENGINE_FILTER_2_APPLY: begin
+                    voice_filter_y2[voice_index] <= filter_y2_next;
+                    filter_output_sample <= filter_y2_next;
+                    engine_state <= ENGINE_ENV_MULT;
+                end
+
                 ENGINE_ENV_MULT: begin
-                    envelope_product_reg <= voice_harmonic_accumulator *
+                    envelope_product_reg <= filter_output_sample *
                         $signed({1'b0, render_envelope_level});
                     engine_state <= ENGINE_VELOCITY_MULT;
                 end
@@ -1077,7 +1280,7 @@ module midi_poly_synth #(
                 sample_pending     <= 1'b0;
                 event_pending      <= 1'b0;
                 sample_out         <= 16'sd0;
-                active_voice_count <= 4'd0;
+                active_voice_count <= 5'd0;
                 sustain_pedal      <= 1'b0;
                 for (i = 0; i < VOICE_COUNT; i = i + 1) begin
                     voice_active[i]   <= 1'b0;

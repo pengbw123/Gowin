@@ -16,20 +16,14 @@ from envelope_tools import (
 )
 
 
-POINTS = 2048
+FULL_SINE_POINTS = 2048
+QUARTER_SINE_POINTS = FULL_SINE_POINTS // 4
 HARMONICS = 16
 ANCHORS = 4
+FILTER_POINTS = 64
 Q15_MAX = 32767
-Q24_MAX = (1 << 24) - 1
-
-
-def decay_ms_to_q24(decay_ms: float, sample_rate: float) -> int:
-    """Return alpha for level[n+1] = level[n] * (1-alpha)."""
-    if decay_ms <= 0:
-        return 0
-    tau_samples = decay_ms * sample_rate / 1000.0
-    alpha = 1.0 - math.exp(-1.0 / tau_samples)
-    return max(1, min(Q24_MAX, round(alpha * Q24_MAX)))
+FILTER_MIN_HZ = 80.0
+FILTER_MAX_HZ = 12_000.0
 
 
 def write_hex(path: Path, values: list[int], digits: int) -> None:
@@ -47,6 +41,7 @@ def update_parameter_header(path: Path, preset: dict) -> None:
     decay_samples, decay_inc = stage_timing(adsr["decay_ms"])
     release_samples, release_inc = stage_timing(adsr["release_ms"])
     pitch_samples, pitch_inc = stage_timing(pitch["time_ms"])
+    filter_config = normalise_filter(preset)
     replacements = {
         "TONE_AMP_ATTACK_SAMPLES": f"32'd{attack_samples}",
         "TONE_AMP_ATTACK_PHASE_INC": f"32'h{attack_inc:08X}",
@@ -58,7 +53,17 @@ def update_parameter_header(path: Path, preset: dict) -> None:
         "TONE_PITCH_ENVELOPE_SAMPLES": f"32'd{pitch_samples}",
         "TONE_PITCH_ENVELOPE_PHASE_INC": f"32'h{pitch_inc:08X}",
         "TONE_PITCH_ENVELOPE_MEM": '"src/generated/pitch_envelope_ratio.mem"',
+        "TONE_AMP_ENVELOPE_TABLE_MEM": '"src/generated/tone_amp_envelope_tables.mem"',
+        "TONE_QUARTER_SINE_MEM": '"src/generated/additive_sine_quarter_512.mem"',
+        "TONE_FILTER_ENVELOPE_MEM": '"src/generated/filter_envelope_4anchor.mem"',
+        "TONE_FILTER_ALPHA_MEM": '"src/generated/filter_alpha_256.mem"',
+        "TONE_DYNAMIC_FILTER_ENABLE": "1'b1" if filter_config["enabled"] else "1'b0",
+        "TONE_DYNAMIC_FILTER_TWO_POLE": "1'b1" if int(filter_config["slope_db_oct"]) >= 12 else "1'b0",
     }
+    for index, anchor in enumerate(filter_config["anchors"]):
+        samples, phase_inc = stage_timing(float(anchor["time_ms"]))
+        replacements[f"TONE_FILTER_{index}_SAMPLES"] = f"32'd{samples}"
+        replacements[f"TONE_FILTER_{index}_PHASE_INC"] = f"32'h{phase_inc:08X}"
     if path.exists():
         text = path.read_text(encoding="ascii")
     else:
@@ -82,28 +87,95 @@ def update_parameter_header(path: Path, preset: dict) -> None:
     path.write_text(text, encoding="ascii")
 
 
+def cutoff_hz_to_code(frequency_hz: float) -> int:
+    """Map cutoff frequency to an 8-bit logarithmic control code."""
+    frequency_hz = max(FILTER_MIN_HZ, min(FILTER_MAX_HZ, float(frequency_hz)))
+    position = math.log(frequency_hz / FILTER_MIN_HZ) / math.log(FILTER_MAX_HZ / FILTER_MIN_HZ)
+    return max(0, min(255, round(position * 255.0)))
+
+
+def default_filter_anchor(anchor_index: int) -> dict:
+    start_hz = (7200.0, 8200.0, 9500.0, 11_000.0)[anchor_index]
+    end_hz = (550.0, 700.0, 900.0, 1400.0)[anchor_index]
+    values = []
+    for point in range(FILTER_POINTS):
+        x = point / (FILTER_POINTS - 1)
+        # Exponential-in-frequency decay gives a natural fast loss of brightness.
+        frequency = start_hz * ((end_hz / start_hz) ** (x ** 0.62))
+        values.append(frequency)
+    return {"time_ms": 1400.0, "cutoff_hz": values}
+
+
+def normalise_filter(preset: dict) -> dict:
+    raw = preset.get("dynamic_filter", {})
+    anchors = raw.get("anchors", [])
+    normalised = []
+    for index in range(ANCHORS):
+        source = anchors[index] if index < len(anchors) else default_filter_anchor(index)
+        points = [float(value) for value in source.get("cutoff_hz", [])]
+        if len(points) != FILTER_POINTS:
+            points = default_filter_anchor(index)["cutoff_hz"]
+        normalised.append({
+            "name": ("C2", "C3", "C4", "C6")[index],
+            "midi_note": (36, 48, 60, 84)[index],
+            "time_ms": max(0.1, float(source.get("time_ms", 1400.0))),
+            "cutoff_hz": points,
+        })
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "slope_db_oct": 12 if int(raw.get("slope_db_oct", 12)) >= 12 else 6,
+        "anchors": normalised,
+    }
+
+
 def export_additive_preset(preset: dict, output: Path) -> None:
     preset = normalise_envelopes(preset)
     anchors = preset["anchors"]
     if len(anchors) != ANCHORS:
         raise ValueError(f"expected {ANCHORS} anchors")
 
-    sine = [round(math.sin(2.0 * math.pi * i / POINTS) * Q15_MAX) for i in range(POINTS)]
+    # Only the first quadrant is stored. RTL mirrors it and applies the sign,
+    # reducing the sine ROM from 2048x16 to 512x16 bits.
+    sine = [
+        round(math.sin(2.0 * math.pi * i / FULL_SINE_POINTS) * Q15_MAX)
+        for i in range(QUARTER_SINE_POINTS)
+    ]
     amplitudes: list[int] = []
-    decays: list[int] = []
     sample_rate = float(preset.get("sample_rate_hz", 48_828.125))
     for anchor in anchors:
-        if len(anchor["amplitudes"]) != HARMONICS or len(anchor["decay_ms"]) != HARMONICS:
-            raise ValueError("every anchor must contain 16 amplitudes and 16 decay times")
+        if len(anchor["amplitudes"]) != HARMONICS:
+            raise ValueError("every anchor must contain 16 amplitudes")
         if sum(anchor["amplitudes"]) > 1.0:
             raise ValueError(f"{anchor['name']} amplitude sum exceeds 1.0")
         amplitudes.extend(round(max(0.0, min(1.0, float(v))) * Q15_MAX) for v in anchor["amplitudes"])
-        decays.extend(decay_ms_to_q24(float(v), sample_rate) for v in anchor["decay_ms"])
+
+    amp_tables = (
+        q16_curve(preset["adsr"]["attack_table"]),
+        q16_curve(preset["adsr"]["decay_table"]),
+        q16_curve(preset["adsr"]["release_table"]),
+        pitch_ratio_q12(preset["pitch_envelope"]["points_semitones"]),
+    )
+    packed_amp_envelopes = [value for table in amp_tables[:3] for value in table]
+
+    filter_config = normalise_filter(preset)
+    filter_codes = [
+        cutoff_hz_to_code(frequency)
+        for anchor in filter_config["anchors"]
+        for frequency in anchor["cutoff_hz"]
+    ]
+    filter_alpha = []
+    for code in range(256):
+        position = code / 255.0
+        cutoff = FILTER_MIN_HZ * ((FILTER_MAX_HZ / FILTER_MIN_HZ) ** position)
+        alpha = 1.0 - math.exp(-2.0 * math.pi * cutoff / sample_rate)
+        filter_alpha.append(max(1, min(65535, round(alpha * 65536.0))))
 
     output.mkdir(parents=True, exist_ok=True)
-    write_hex(output / "additive_sine_2048.mem", sine, 4)
+    write_hex(output / "additive_sine_quarter_512.mem", sine, 4)
     write_hex(output / "additive_harmonic_amp.mem", amplitudes, 4)
-    write_hex(output / "additive_harmonic_decay.mem", decays, 6)
+    write_hex(output / "tone_amp_envelope_tables.mem", packed_amp_envelopes, 4)
+    write_hex(output / "filter_envelope_4anchor.mem", filter_codes, 2)
+    write_hex(output / "filter_alpha_256.mem", filter_alpha, 4)
     write_hex(output / "tone_amp_attack_curve.mem", q16_curve(preset["adsr"]["attack_table"]), 4)
     write_hex(output / "tone_amp_decay_curve.mem", q16_curve(preset["adsr"]["decay_table"]), 4)
     write_hex(output / "tone_amp_release_curve.mem", q16_curve(preset["adsr"]["release_table"]), 4)
@@ -132,8 +204,9 @@ def main() -> None:
     preset = normalise_envelopes(json.loads(args.preset.read_text(encoding="utf-8")))
     export_additive_preset(preset, args.output)
     print(
-        f"generated {POINTS}-point sine ROM, {ANCHORS * HARMONICS} four-anchor "
-        "coefficients and writable envelope RAM initialisation files"
+        f"generated {QUARTER_SINE_POINTS}-point quarter sine ROM, "
+        f"{ANCHORS * HARMONICS} four-anchor amplitudes, packed ADSR/pitch RAM "
+        "and four-anchor dynamic-filter tables"
     )
 
 

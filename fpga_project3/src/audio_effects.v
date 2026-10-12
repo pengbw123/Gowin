@@ -1,7 +1,6 @@
 // Resource-conscious mono effects chain for the Primer 25K.
 //
 //   dry synth -> modulated short delay (chorus)
-//             -> feedback delay
 //             -> three-comb + all-pass room simulation (reverb)
 //
 // The large sample histories infer BSRAM.  Coefficients and wet/dry mixes use
@@ -12,8 +11,6 @@ module audio_effects (
     input  wire               sample_tick,
     input  wire signed [15:0] dry_sample,
     input  wire [6:0]         chorus_mix,
-    input  wire [6:0]         delay_mix,
-    input  wire [6:0]         delay_time,
     input  wire [6:0]         reverb_mix,
     output reg  signed [15:0] sample_out
 );
@@ -34,16 +31,6 @@ module audio_effects (
         {1'b0, chorus_triangle, 1'b0};
     wire [10:0] chorus_read_pointer = chorus_write_pointer -
         chorus_delay_samples;
-
-    // 16384 samples give a maximum useful echo time of about 208 ms with the
-    // selected knob mapping.  Feedback is fixed at 1/2 for a clear demo.
-    reg signed [15:0] delay_memory [0:16383];
-    reg [13:0] delay_write_pointer;
-    reg signed [15:0] delay_tap;
-    reg signed [15:0] delay_stage;
-    reg [14:0] delay_fill;
-    wire [13:0] delay_samples = 14'd2048 + {1'b0, delay_time, 6'b0};
-    wire [13:0] delay_read_pointer = delay_write_pointer - delay_samples;
 
     // Three unequal comb delays create many differently spaced reflections.
     // The following all-pass section increases echo density and removes the
@@ -157,7 +144,6 @@ module audio_effects (
     endfunction
 
     wire signed [15:0] chorus_wet = (chorus_fill[11]) ? chorus_tap : 16'sd0;
-    wire signed [15:0] delay_wet  = (delay_fill[14]) ? delay_tap : 16'sd0;
     wire signed [15:0] comb1_wet  = (reverb_fill >= 13'd1499) ? comb1_tap : 16'sd0;
     wire signed [15:0] comb2_wet  = (reverb_fill >= 13'd1777) ? comb2_tap : 16'sd0;
     wire signed [15:0] comb3_wet  = (reverb_fill >= 13'd2137) ? comb3_tap : 16'sd0;
@@ -169,10 +155,6 @@ module audio_effects (
             chorus_tap           <= 16'sd0;
             chorus_stage         <= 16'sd0;
             chorus_fill          <= 12'd0;
-            delay_write_pointer  <= 14'd0;
-            delay_tap            <= 16'sd0;
-            delay_stage          <= 16'sd0;
-            delay_fill           <= 15'd0;
             comb1_pointer        <= 11'd0;
             comb2_pointer        <= 11'd0;
             comb3_pointer        <= 12'd0;
@@ -205,16 +187,6 @@ module audio_effects (
             if (!chorus_fill[11])
                 chorus_fill <= chorus_fill + 1'b1;
 
-            // DELAY: write input plus half of the old echo back into the ring
-            // buffer.  That feedback creates successively quieter repeats.
-            delay_memory[delay_write_pointer] <= saturate16(
-                extend16(chorus_stage) + (extend16(delay_wet) >>> 1));
-            delay_tap <= delay_memory[delay_read_pointer];
-            delay_stage <= blend_effect(chorus_stage, delay_wet, delay_mix);
-            delay_write_pointer <= delay_write_pointer + 1'b1;
-            if (!delay_fill[14])
-                delay_fill <= delay_fill + 1'b1;
-
             // REVERB: parallel feedback delays model several wall-reflection
             // paths. Unequal lengths make their echoes overlap rather than
             // line up. The all-pass stage diffuses them into a dense tail.
@@ -246,7 +218,7 @@ module audio_effects (
             comb1_write_pointer <= comb1_pointer;
             comb2_write_pointer <= comb2_pointer;
             comb3_write_pointer <= comb3_pointer;
-            reverb_input_delayed <= delay_stage;
+            reverb_input_delayed <= chorus_stage;
             comb_pipeline_valid <= 1'b1;
 
             comb_sum <= (extend16(comb1_wet) + extend16(comb2_wet) +
@@ -261,7 +233,7 @@ module audio_effects (
                 reverb_stage <= saturate16(allpass_output_value);
             end
             allpass_pipeline_valid <= 1'b1;
-            sample_out <= blend_reverb(delay_stage, reverb_stage, reverb_mix);
+            sample_out <= blend_reverb(chorus_stage, reverb_stage, reverb_mix);
 
             if (comb1_pointer == 11'd1498)
                 comb1_pointer <= 11'd0;

@@ -1,4 +1,4 @@
-"""Four-anchor editor with independent amplitude and decay per partial."""
+"""Four-anchor additive timbre, ADSR/pitch and dynamic-filter editor."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ from typing import Callable
 
 from additive_uart_protocol import (
     ANCHOR_MIDI_NOTES, ANCHOR_NAMES, DEFAULT_PERFORMANCE, load_preset,
-    envelope_packets, preset_packets, send_packets, strum_packet,
+    envelope_packets, normalise_dynamic_filter, preset_packets, send_packets,
+    strum_packet,
 )
 from envelope_tools import (
     CURVE_POINTS, SAMPLE_RATE,
@@ -26,6 +27,7 @@ from generate_additive_tables import export_additive_preset
 HERE = Path(__file__).resolve().parent
 DEFAULT_PRESET = HERE / "instrument_4anchor_relative_decay.json"
 MIN_DECAY_MS, MAX_DECAY_MS = 50.0, 120000.0
+FILTER_POINTS, FILTER_MIN_HZ, FILTER_MAX_HZ = 64, 80.0, 12000.0
 PITCH_RANGE_OPTIONS = {
     "±0.5半音（微颤音）": 0.5,
     "±1半音（精细）": 1.0,
@@ -162,6 +164,85 @@ class HarmonicDecayCanvas(tk.Canvas):
             )
             self.create_text((x0 + x1) / 2, bottom + 11, text=f"{harmonic + 1}×",
                              fill="#c4b6dc", font=("Segoe UI", 8))
+
+
+class FilterEnvelopeCanvas(tk.Canvas):
+    """Editable 64-point cutoff curve, displayed on a logarithmic Hz axis."""
+
+    def __init__(self, master: tk.Misc,
+                 on_change: Callable[[list[float]], None]) -> None:
+        super().__init__(master, height=165, background="#100d25",
+                         highlightthickness=1, highlightbackground="#493b70",
+                         cursor="crosshair")
+        self.values = [1000.0] * FILTER_POINTS
+        self.on_change = on_change
+        self._last_index = None
+        self._last_value = None
+        self.bind("<Configure>", lambda _event: self.redraw())
+        self.bind("<Button-1>", self._start)
+        self.bind("<B1-Motion>", self._drag)
+        self.bind("<ButtonRelease-1>", self._finish)
+
+    def set_values(self, values: list[float]) -> None:
+        if len(values) != FILTER_POINTS:
+            raise ValueError("filter envelope must contain 64 points")
+        self.values = [max(FILTER_MIN_HZ, min(FILTER_MAX_HZ, float(v))) for v in values]
+        self.redraw()
+
+    def _geometry(self) -> tuple[float, float, float, float]:
+        return 58.0, 10.0, max(420.0, self.winfo_width() - 12.0), max(112.0, self.winfo_height() - 25.0)
+
+    def _point(self, x: float, y: float) -> tuple[int, float]:
+        left, top, right, bottom = self._geometry()
+        index = round((max(left, min(right, x)) - left) /
+                      max(1.0, right - left) * (FILTER_POINTS - 1))
+        fraction = (bottom - max(top, min(bottom, y))) / max(1.0, bottom - top)
+        value = FILTER_MIN_HZ * ((FILTER_MAX_HZ / FILTER_MIN_HZ) ** fraction)
+        return index, value
+
+    def _start(self, event: tk.Event) -> None:
+        self._last_index, self._last_value = self._point(event.x, event.y)
+        self.values[self._last_index] = self._last_value
+        self.redraw()
+
+    def _drag(self, event: tk.Event) -> None:
+        index, value = self._point(event.x, event.y)
+        if self._last_index is None:
+            self._last_index, self._last_value = index, value
+        start, end = sorted((self._last_index, index))
+        first = self._last_value if self._last_index <= index else value
+        last = value if self._last_index <= index else self._last_value
+        # Interpolate in log-frequency, matching the FPGA's cutoff code.
+        first_log, last_log = math.log(first), math.log(last)
+        span = max(1, end - start)
+        for offset in range(end - start + 1):
+            self.values[start + offset] = math.exp(
+                first_log + (last_log - first_log) * offset / span)
+        self._last_index, self._last_value = index, value
+        self.redraw()
+
+    def _finish(self, _event: tk.Event) -> None:
+        self._last_index = self._last_value = None
+        self.on_change(list(self.values))
+
+    def redraw(self) -> None:
+        self.delete("all")
+        left, top, right, bottom = self._geometry()
+        denominator = math.log(FILTER_MAX_HZ / FILTER_MIN_HZ)
+        for frequency in (100, 250, 500, 1000, 2000, 5000, 12000):
+            fraction = math.log(frequency / FILTER_MIN_HZ) / denominator
+            y = bottom - fraction * (bottom - top)
+            self.create_line(left, y, right, y, fill="#30284e")
+            label = f"{frequency / 1000:g}k" if frequency >= 1000 else str(frequency)
+            self.create_text(left - 6, y, text=label, anchor="e",
+                             fill="#b0a4cf", font=("Segoe UI", 8))
+        points = []
+        for index, value in enumerate(self.values):
+            x = left + index * (right - left) / (FILTER_POINTS - 1)
+            fraction = math.log(value / FILTER_MIN_HZ) / denominator
+            y = bottom - fraction * (bottom - top)
+            points.extend((x, y))
+        self.create_line(*points, fill="#b985ff", width=2)
 
 
 class EditableCurveCanvas(tk.Canvas):
@@ -555,7 +636,7 @@ class EnvelopeEditorWindow(tk.Toplevel):
             self._preview_started = time.perf_counter()
             self._animate_harmonics()
             self._refresh_overview()
-            self.editor.status_var.set("正在试听：包含单谐波衰减、ADSR和Pitch包络。")
+            self.editor.status_var.set("正在试听：包含动态低通、ADSR和Pitch包络，与当前FPGA信号链一致。")
         except Exception as error:
             messagebox.showerror("试听失败", str(error), parent=self)
 
@@ -611,7 +692,7 @@ class HarmonicEditor(tk.Tk):
         self.minsize(920, 640)
         self.preset = load_preset(DEFAULT_PRESET)
         self.port_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="四基准各自保存16组独立相对衰减；修改后点击“发送全部”。")
+        self.status_var = tk.StringVar(value="16复音×16谐波；四基准动态滤波曲线会对中间音符插值。")
         self.scale_factor_var = tk.StringVar(value="1.0")
         self.preview_summary_var = tk.StringVar()
         self.selected_amp_var = tk.StringVar(value="0")
@@ -619,6 +700,9 @@ class HarmonicEditor(tk.Tk):
         self.selected_decay_var = tk.StringVar(value="0")
         self.selected_decay_label_var = tk.StringVar(value="C2 / 1×")
         self.decay_point_var = tk.StringVar()
+        self.filter_enable_var = tk.BooleanVar(value=True)
+        self.filter_slope_var = tk.StringVar(value="12 dB/oct")
+        self.filter_time_vars = [tk.StringVar(value="1400") for _ in range(4)]
         self.performance_mode_var = tk.StringVar(value="普通演奏")
         self.strum_interval_var = tk.StringVar(value="18")
         self.strum_gate_var = tk.StringVar(value="120")
@@ -641,6 +725,7 @@ class HarmonicEditor(tk.Tk):
         self.pitch_points = [0.0] * CURVE_POINTS
         self.amp_values = [[0.0] * 16 for _ in range(4)]
         self.decay_values = [[0.0] * 16 for _ in range(4)]
+        self.filter_values = [[1000.0] * FILTER_POINTS for _ in range(4)]
         self.bar_canvases: list[HarmonicBarCanvas] = []
         self._build()
         self._load_into_widgets(self.preset)
@@ -707,22 +792,26 @@ class HarmonicEditor(tk.Tk):
 
         decay = ttk.LabelFrame(
             self,
-            text="当前基准的16次谐波独立相对衰减（纵轴为时间常数；越高衰减越慢）",
+            text="当前基准的动态低通包络（纵轴为对数截止频率；横轴为该基准的包络时间）",
             padding=(6, 3),
         )
         decay.pack(fill="x", padx=8, pady=(2, 1))
-        self.decay_canvas = HarmonicDecayCanvas(
-            decay, 0, self._decay_changed, self._decay_selected
-        )
-        self.decay_canvas.pack(fill="x")
+        self.filter_canvas = FilterEnvelopeCanvas(decay, self._filter_changed)
+        self.filter_canvas.pack(fill="x")
         decay_exact = ttk.Frame(decay); decay_exact.pack(fill="x", pady=(2, 0))
-        ttk.Label(decay_exact, text="选中").pack(side="left")
-        ttk.Label(decay_exact, textvariable=self.selected_decay_label_var, width=9).pack(side="left", padx=(3, 8))
-        ttk.Label(decay_exact, text="相对衰减τ/ms（0=保持）").pack(side="left")
-        ttk.Entry(decay_exact, textvariable=self.selected_decay_var, width=12).pack(side="left", padx=3)
-        ttk.Button(decay_exact, text="应用", command=self._apply_exact_decay).pack(side="left")
-        ttk.Button(decay_exact, text="设为保持", command=self._disable_selected_decay).pack(side="left", padx=4)
-        ttk.Label(decay_exact, textvariable=self.decay_point_var).pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(decay_exact, text="启用IIR（取消即原声直通）",
+                        variable=self.filter_enable_var).pack(side="left")
+        ttk.Label(decay_exact, text="斜率").pack(side="left", padx=(14, 2))
+        ttk.Combobox(decay_exact, textvariable=self.filter_slope_var,
+                     values=("6 dB/oct", "12 dB/oct"), state="readonly",
+                     width=10).pack(side="left")
+        ttk.Label(decay_exact, text="当前基准遍历时间/ms").pack(side="left", padx=(14, 2))
+        self.filter_time_entry = ttk.Entry(decay_exact, width=9)
+        self.filter_time_entry.pack(side="left")
+        self.filter_time_entry.configure(
+            textvariable=self.filter_time_vars[self._current_anchor_index()])
+        ttk.Label(decay_exact, text="曲线按C2/C3/C4/C6保存，中间音符自动插值。",
+                  foreground="#6c5aa7").pack(side="left", padx=(14, 0))
         ttk.Label(self, textvariable=self.status_var, padding=(8, 4)).pack(fill="x")
 
     def _current_anchor_index(self) -> int:
@@ -734,22 +823,23 @@ class HarmonicEditor(tk.Tk):
     def _tab_changed(self, *_args) -> None:
         self._selected_anchor = self._current_anchor_index()
         self._selected_harmonic = self.bar_canvases[self._selected_anchor].selected
-        self.decay_canvas.set_anchor_values(
-            self._selected_anchor, self.decay_values[self._selected_anchor],
-            self._selected_harmonic,
-        )
-        self._sync_selected_amplitude(); self._sync_selected_decay(); self._schedule_preview()
+        self.filter_canvas.set_values(self.filter_values[self._selected_anchor])
+        self.filter_time_entry.configure(
+            textvariable=self.filter_time_vars[self._selected_anchor])
+        self._sync_selected_amplitude(); self._schedule_preview()
 
     def _bar_selected(self, anchor: int, harmonic: int) -> None:
         self._selected_anchor, self._selected_harmonic = anchor, harmonic
-        self.decay_canvas.set_anchor_values(anchor, self.decay_values[anchor], harmonic)
-        self._sync_selected_amplitude(); self._sync_selected_decay()
+        self._sync_selected_amplitude()
 
     def _bar_changed(self, anchor: int, harmonic: int, value: float) -> None:
         self.amp_values[anchor][harmonic] = value
         self._selected_anchor, self._selected_harmonic = anchor, harmonic
-        self.decay_canvas.set_anchor_values(anchor, self.decay_values[anchor], harmonic)
-        self._sync_selected_amplitude(); self._sync_selected_decay(); self._schedule_preview()
+        self._sync_selected_amplitude(); self._schedule_preview()
+
+    def _filter_changed(self, values: list[float]) -> None:
+        anchor = self._current_anchor_index()
+        self.filter_values[anchor] = list(values)
 
     def _sync_selected_amplitude(self) -> None:
         value = self.amp_values[self._selected_anchor][self._selected_harmonic]
@@ -901,6 +991,13 @@ class HarmonicEditor(tk.Tk):
             self.amp_values[anchor] = [float(value) for value in data["amplitudes"]]
             self.decay_values[anchor] = [float(value) for value in data["decay_ms"]]
             self.bar_canvases[anchor].set_values(self.amp_values[anchor])
+        dynamic_filter = normalise_dynamic_filter(preset)
+        self.filter_enable_var.set(dynamic_filter["enabled"])
+        self.filter_slope_var.set(
+            "12 dB/oct" if dynamic_filter["slope_db_oct"] >= 12 else "6 dB/oct")
+        for anchor, data in enumerate(dynamic_filter["anchors"]):
+            self.filter_values[anchor] = list(data["cutoff_hz"])
+            self.filter_time_vars[anchor].set(str(data["time_ms"]))
         performance = preset.get("performance", DEFAULT_PERFORMANCE)
         self.performance_mode_var.set(
             "吉他扫弦" if performance.get("mode") == "strum" else "普通演奏")
@@ -908,11 +1005,10 @@ class HarmonicEditor(tk.Tk):
         self.strum_gate_var.set(str(performance.get("strum_gate_ms", 120)))
         self.strum_speed_depth_var.set(str(performance.get("velocity_speed_depth", 80)))
         self.strum_brightness_depth_var.set(str(performance.get("velocity_brightness_depth", 96)))
-        self.decay_canvas.set_anchor_values(
-            self._selected_anchor, self.decay_values[self._selected_anchor],
-            self._selected_harmonic,
-        )
-        self._sync_selected_amplitude(); self._sync_selected_decay(); self._schedule_preview()
+        self.filter_canvas.set_values(self.filter_values[self._selected_anchor])
+        self.filter_time_entry.configure(
+            textvariable=self.filter_time_vars[self._selected_anchor])
+        self._sync_selected_amplitude(); self._schedule_preview()
 
     def _collect(self) -> dict:
         preset = deepcopy(self.preset); preset["format"] = "gowin-additive-tone-v2"
@@ -937,6 +1033,19 @@ class HarmonicEditor(tk.Tk):
             "strum_gate_ms": int(self.strum_gate_var.get()),
             "velocity_speed_depth": int(self.strum_speed_depth_var.get()),
             "velocity_brightness_depth": int(self.strum_brightness_depth_var.get()),
+        }
+        preset["dynamic_filter"] = {
+            "enabled": bool(self.filter_enable_var.get()),
+            "slope_db_oct": 12 if self.filter_slope_var.get().startswith("12") else 6,
+            "anchors": [
+                {
+                    "name": ANCHOR_NAMES[index],
+                    "midi_note": ANCHOR_MIDI_NOTES[index],
+                    "time_ms": float(self.filter_time_vars[index].get()),
+                    "cutoff_hz": [round(value, 3) for value in self.filter_values[index]],
+                }
+                for index in range(4)
+            ],
         }
         preset_packets(preset)
         return preset

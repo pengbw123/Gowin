@@ -141,7 +141,7 @@ module top (
     wire sample_tick;
     wire signed [15:0] synth_sample;
     wire signed [15:0] effected_sample;
-    wire [3:0] active_voice_count;
+    wire [4:0] active_voice_count;
 
     wire [13:0] pitch_bend;
     wire [6:0]  vibrato_depth;
@@ -189,6 +189,15 @@ module top (
     wire [3:0]  harmonic_write_index;
     wire [23:0] harmonic_write_value;
     wire        harmonic_commit;
+    wire        filter_write_valid;
+    wire [1:0]  filter_write_anchor;
+    wire [5:0]  filter_write_address;
+    wire [7:0]  filter_write_value;
+    wire        filter_time_write_valid;
+    wire [1:0]  filter_time_write_anchor;
+    wire [31:0] filter_time_write_phase_inc;
+    wire        filter_enable;
+    wire        filter_two_pole;
     wire        strum_mode;
     wire [15:0] strum_interval_ms;
     wire [15:0] strum_gate_ms;
@@ -210,7 +219,9 @@ module top (
         .AMP_RELEASE_SAMPLES(`TONE_AMP_RELEASE_SAMPLES),
         .AMP_RELEASE_PHASE_INC(`TONE_AMP_RELEASE_PHASE_INC),
         .PITCH_ENVELOPE_SAMPLES(`TONE_PITCH_ENVELOPE_SAMPLES),
-        .PITCH_ENVELOPE_PHASE_INC(`TONE_PITCH_ENVELOPE_PHASE_INC)
+        .PITCH_ENVELOPE_PHASE_INC(`TONE_PITCH_ENVELOPE_PHASE_INC),
+        .FILTER_ENABLE(`TONE_DYNAMIC_FILTER_ENABLE),
+        .FILTER_TWO_POLE(`TONE_DYNAMIC_FILTER_TWO_POLE)
     ) u_synth_uart_control (
         .clk(clk),
         .reset_n(audio_reset_n),
@@ -234,6 +245,15 @@ module top (
         .harmonic_write_index(harmonic_write_index),
         .harmonic_write_value(harmonic_write_value),
         .harmonic_commit(harmonic_commit),
+        .filter_write_valid(filter_write_valid),
+        .filter_write_anchor(filter_write_anchor),
+        .filter_write_address(filter_write_address),
+        .filter_write_value(filter_write_value),
+        .filter_time_write_valid(filter_time_write_valid),
+        .filter_time_write_anchor(filter_time_write_anchor),
+        .filter_time_write_phase_inc(filter_time_write_phase_inc),
+        .filter_enable(filter_enable),
+        .filter_two_pole(filter_two_pole),
         .strum_mode(strum_mode),
         .strum_interval_ms(strum_interval_ms),
         .strum_gate_ms(strum_gate_ms),
@@ -303,7 +323,10 @@ module top (
     assign uart_midi_event_ready = synth_midi_event_ready
                                  & ~strum_midi_event_valid;
 
-    midi_poly_synth #(.VOICE_COUNT(8)) u_midi_poly_synth (
+    // Twelve voices is the timing-safe 25K profile.  The engine itself
+    // remains parameterised; Mega 60K can raise this to 32 after widening the
+    // voice index and increasing the two-lane render budget.
+    midi_poly_synth #(.VOICE_COUNT(12)) u_midi_poly_synth (
         .clk(clk),
         .reset_n(audio_reset_n),
         .sample_tick(sample_tick),
@@ -329,6 +352,15 @@ module top (
         .harmonic_write_index(harmonic_write_index),
         .harmonic_write_value(harmonic_write_value),
         .harmonic_commit(harmonic_commit),
+        .filter_write_valid(filter_write_valid),
+        .filter_write_anchor(filter_write_anchor),
+        .filter_write_address(filter_write_address),
+        .filter_write_value(filter_write_value),
+        .filter_time_write_valid(filter_time_write_valid),
+        .filter_time_write_anchor(filter_time_write_anchor),
+        .filter_time_write_phase_inc(filter_time_write_phase_inc),
+        .filter_enable(filter_enable),
+        .filter_two_pole(filter_two_pole),
         .pitch_bend(pitch_bend),
         .vibrato_depth(vibrato_depth),
         .vibrato_rate(vibrato_rate),
@@ -343,8 +375,6 @@ module top (
         .sample_tick(sample_tick),
         .dry_sample(synth_sample),
         .chorus_mix(chorus_mix),
-        .delay_mix(delay_mix),
-        .delay_time(delay_time),
         .reverb_mix(reverb_mix),
         .sample_out(effected_sample)
     );
@@ -361,7 +391,7 @@ module top (
         .i2s_din(i2s_din)
     );
 
-    wire [3:0] unused_active_voice_count = active_voice_count;
+    wire [4:0] unused_active_voice_count = active_voice_count;
     wire [2:0] unused_held_note_count = held_note_count;
     wire unused_strum_active = strum_active;
     wire unused_uart_packet_received = uart_packet_received;

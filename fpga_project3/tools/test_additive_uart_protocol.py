@@ -2,9 +2,12 @@ import unittest
 from pathlib import Path
 
 from additive_uart_protocol import (
-    CMD_ENVELOPE_TABLE_POINT, CMD_PITCH_ENVELOPE_TIME, CMD_STRUM_CONFIG,
+    CMD_ENVELOPE_TABLE_POINT, CMD_FILTER_CONFIG, CMD_FILTER_POINT,
+    CMD_FILTER_TIME, CMD_HARMONIC_DECAY, CMD_PITCH_ENVELOPE_TIME,
+    CMD_STRUM_CONFIG,
     CMD_MIDI_EVENT, TABLE_PITCH_RATIO, envelope_packets, envelope_table_packet,
-    load_preset, make_packet, midi_event_packet, strum_packet,
+    filter_packets, load_preset, make_packet, midi_event_packet,
+    preset_packets, strum_packet,
 )
 
 
@@ -53,6 +56,20 @@ class StrumPacketTests(unittest.TestCase):
     def test_midi_event_rejects_invalid_data_byte(self):
         with self.assertRaises(ValueError):
             midi_event_packet(0x90, 128, 100)
+
+    def test_dynamic_filter_download_is_complete(self):
+        preset = load_preset(Path(__file__).with_name("pianotone2.json"))
+        packets = filter_packets(preset)
+        self.assertEqual(len(packets), 1 + 4 * (1 + 64))
+        self.assertEqual(packets[0][2], CMD_FILTER_CONFIG)
+        self.assertEqual(sum(packet[2] == CMD_FILTER_TIME for packet in packets), 4)
+        self.assertEqual(sum(packet[2] == CMD_FILTER_POINT for packet in packets), 4 * 64)
+
+    def test_current_preset_uses_filter_not_partial_decay_packets(self):
+        preset = load_preset(Path(__file__).with_name("pianotone2.json"))
+        packets = preset_packets(preset)
+        self.assertFalse(any(packet[2] == CMD_HARMONIC_DECAY for packet in packets))
+        self.assertTrue(any(packet[2] == CMD_FILTER_CONFIG for packet in packets))
 
 
 

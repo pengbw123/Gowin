@@ -31,6 +31,65 @@ DEFAULT_PITCH_ENVELOPE = {
     "points_semitones": [0.0] * CURVE_POINTS,
 }
 
+FILTER_POINTS = 64
+FILTER_MIN_HZ = 80.0
+FILTER_MAX_HZ = 12_000.0
+
+
+def _default_filter_points(anchor_index: int) -> np.ndarray:
+    start_hz = (7200.0, 8200.0, 9500.0, 11_000.0)[anchor_index]
+    end_hz = (550.0, 700.0, 900.0, 1400.0)[anchor_index]
+    progress = np.arange(FILTER_POINTS, dtype=np.float64) / (FILTER_POINTS - 1)
+    return start_hz * np.power(end_hz / start_hz, np.power(progress, 0.62))
+
+
+def _preview_filter(preset: dict, anchor_index: int, total_samples: int) -> tuple[np.ndarray, int]:
+    """Return the selected anchor's cutoff envelope and pole count.
+
+    This deliberately mirrors the FPGA representation: a 64-point cutoff
+    curve advances once per audio sample, then holds its last point.  Missing
+    filter data means bypass, which keeps old preset files playable.
+    """
+    raw = preset.get("dynamic_filter", {})
+    if not bool(raw.get("enabled", True)):
+        return np.full(total_samples, FILTER_MAX_HZ), 0
+    anchors = raw.get("anchors", [])
+    selected = max(0, min(3, int(anchor_index)))
+    source = anchors[selected] if selected < len(anchors) else {}
+    points = np.asarray(source.get("cutoff_hz", []), dtype=np.float64)
+    if points.size != FILTER_POINTS:
+        points = _default_filter_points(selected)
+    time_ms = max(0.1, float(source.get("time_ms", 1400.0)))
+    duration_samples = max(1, round(time_ms * SAMPLE_RATE / 1000.0))
+    addresses = np.minimum(
+        FILTER_POINTS - 1,
+        (np.minimum(np.arange(total_samples), duration_samples - 1) * FILTER_POINTS)
+        // duration_samples,
+    )
+    cutoff = np.clip(points[addresses], FILTER_MIN_HZ, FILTER_MAX_HZ)
+    poles = 2 if int(raw.get("slope_db_oct", 12)) >= 12 else 1
+    return cutoff, poles
+
+
+def _apply_dynamic_lowpass(signal: np.ndarray, cutoff: np.ndarray, poles: int) -> np.ndarray:
+    """Apply the same time-varying one/two-pole filter used by the RTL."""
+    if poles <= 0 or signal.size == 0:
+        return signal
+    alpha = 1.0 - np.exp(-2.0 * math.pi * cutoff / SAMPLE_RATE)
+    output = np.empty_like(signal)
+    y1 = 0.0
+    y2 = 0.0
+    if poles == 1:
+        for index, sample in enumerate(signal):
+            y1 += alpha[index] * (sample - y1)
+            output[index] = y1
+    else:
+        for index, sample in enumerate(signal):
+            y1 += alpha[index] * (sample - y1)
+            y2 += alpha[index] * (y1 - y2)
+            output[index] = y2
+    return output
+
 
 def curve_lut(curve: float) -> list[float]:
     """Return the same power-curve LUT used by the original tone editor."""
@@ -172,7 +231,7 @@ def render_additive_preview(
     anchor_index: int = 2,
     hold_ms: float = 900.0,
 ) -> np.ndarray:
-    """Render one note using harmonic decay, ADSR and the pitch envelope."""
+    """Render one note using the FPGA's ADSR, pitch and dynamic-filter path."""
     tone = normalise_envelopes(preset)
     anchor = tone["anchors"][max(0, min(3, int(anchor_index)))]
     note = int(anchor["midi_note"])
@@ -180,8 +239,6 @@ def render_additive_preview(
     hold_samples = max(1, round(float(hold_ms) * SAMPLE_RATE / 1000.0))
     release_samples, _ = stage_timing(float(tone["adsr"]["release_ms"]))
     total_samples = hold_samples + release_samples + round(0.08 * SAMPLE_RATE)
-    time = np.arange(total_samples, dtype=np.float64) / SAMPLE_RATE
-
     pitch = tone["pitch_envelope"]
     pitch_samples, _ = stage_timing(float(pitch["time_ms"]))
     addresses = np.minimum(
@@ -194,17 +251,11 @@ def render_additive_preview(
     phase = np.cumsum((2.0 * math.pi * base_frequency / SAMPLE_RATE) * ratios)
 
     signal = np.zeros(total_samples, dtype=np.float64)
-    for harmonic, (amplitude, decay_ms) in enumerate(
-        zip(anchor["amplitudes"], anchor["decay_ms"]), start=1
-    ):
-        amplitude = float(amplitude)
-        decay_ms = float(decay_ms)
-        relative = (
-            np.ones(total_samples, dtype=np.float64)
-            if decay_ms <= 0.0
-            else np.exp(-time / (decay_ms / 1000.0))
-        )
-        signal += amplitude * relative * np.sin(harmonic * phase)
+    for harmonic, amplitude in enumerate(anchor["amplitudes"], start=1):
+        signal += float(amplitude) * np.sin(harmonic * phase)
+
+    cutoff, poles = _preview_filter(tone, anchor_index, total_samples)
+    signal = _apply_dynamic_lowpass(signal, cutoff, poles)
 
     envelope = amplitude_envelope_samples(tone["adsr"], hold_samples, total_samples)
     signal *= envelope
@@ -220,11 +271,10 @@ def preview_harmonic_frames(
     hold_ms: float = 900.0,
     frame_rate: float = 30.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return time stamps and the sixteen audible partial levels for preview.
+    """Return the sixteen estimated audible partial levels during preview.
 
-    Each column is ``A_k * PartialDecay_k(t) * ADSR(t)``.  Pitch modulation
-    changes the partial frequencies but not these magnitudes, so the returned
-    bars stay directly comparable with the editor's initial spectrum.
+    The bars use the exact magnitude response of the FPGA one/two-pole filter
+    at each harmonic frequency, multiplied by the common ADSR.
     """
     tone = normalise_envelopes(preset)
     anchor = tone["anchors"][max(0, min(3, int(anchor_index)))]
@@ -241,13 +291,22 @@ def preview_harmonic_frames(
         tone["adsr"], hold_samples, total_samples
     )[indices]
     amplitudes = np.asarray(anchor["amplitudes"], dtype=np.float64)
-    decay_ms = np.asarray(anchor["decay_ms"], dtype=np.float64)
-    relative = np.ones((frame_count, len(amplitudes)), dtype=np.float64)
-    decaying = decay_ms > 0.0
-    if np.any(decaying):
-        relative[:, decaying] = np.exp(
-            -times[:, None] / (decay_ms[decaying][None, :] / 1000.0)
+    cutoff, poles = _preview_filter(tone, anchor_index, total_samples)
+    if poles <= 0:
+        response = np.ones((frame_count, len(amplitudes)), dtype=np.float64)
+    else:
+        base_frequency = 440.0 * 2.0 ** ((int(anchor["midi_note"]) - 69) / 12.0)
+        frequencies = base_frequency * np.arange(1, len(amplitudes) + 1, dtype=np.float64)
+        frame_cutoff = cutoff[indices]
+        alpha = 1.0 - np.exp(-2.0 * math.pi * frame_cutoff[:, None] / SAMPLE_RATE)
+        omega = 2.0 * math.pi * frequencies[None, :] / SAMPLE_RATE
+        denominator = np.sqrt(
+            1.0 + (1.0 - alpha) ** 2
+            - 2.0 * (1.0 - alpha) * np.cos(omega)
         )
-    levels = amplitudes[None, :] * relative * envelope[:, None]
+        response = alpha / np.maximum(denominator, 1.0e-12)
+        if poles >= 2:
+            response *= response
+    levels = amplitudes[None, :] * response * envelope[:, None]
     return times, levels
 

@@ -64,6 +64,8 @@ module midi_poly_synth #(
     output reg [4:0]          active_voice_count
 );
 
+    localparam integer VOICE_INDEX_BITS = (VOICE_COUNT <= 16) ? 4 : 5;
+
     localparam integer HARMONIC_COUNT = 16;
     localparam [31:0] HARMONIC_PHASE_LIMIT = 32'h73333333; // 0.45 * Fs
 
@@ -106,6 +108,7 @@ module midi_poly_synth #(
     localparam [5:0] ENGINE_POST_PREPARE       = 6'd34;
     localparam [5:0] ENGINE_PIPELINE_LOAD      = 6'd35;
     localparam [5:0] ENGINE_OUTPUT_COMMIT      = 6'd36;
+    localparam [5:0] ENGINE_INIT_FILTER_CALC   = 6'd37;
 
     localparam [6:0] DEFAULT_MASTER_VOLUME =
         ((`TONE_MASTER_GAIN_Q15 * 32'd127) + 32'd16384) >> 15;
@@ -185,7 +188,6 @@ module midi_poly_synth #(
     reg [31:0]          voice_phase_increment [0:VOICE_COUNT-1];
     reg [31:0]          voice_current_increment [0:VOICE_COUNT-1];
     reg [2:0]           envelope_state [0:VOICE_COUNT-1];
-    reg [31:0]          envelope_count [0:VOICE_COUNT-1];
     reg [31:0]          envelope_phase [0:VOICE_COUNT-1];
     reg [15:0]          envelope_start [0:VOICE_COUNT-1];
     reg [15:0]          envelope_level [0:VOICE_COUNT-1];
@@ -200,7 +202,7 @@ module midi_poly_synth #(
 
     reg [5:0] engine_state;
     reg [15:0] engine_watchdog;
-    reg [3:0] voice_index;
+    reg [VOICE_INDEX_BITS-1:0] voice_index;
     reg [3:0] init_harmonic_index;
     reg [4:0] audible_voice_count;
     reg signed [38:0] mix_accumulator;
@@ -209,7 +211,6 @@ module midi_poly_synth #(
 
     // The packed envelope RAM has two synchronous read ports: amplitude and
     // pitch can therefore be fetched together without four separate BSRAMs.
-    reg [31:0] render_envelope_count;
     reg [31:0] render_envelope_phase;
     reg [31:0] render_pitch_envelope_phase;
     reg [2:0]  envelope_state_reg;
@@ -235,7 +236,7 @@ module midi_poly_synth #(
 
     reg [31:0] pitch_base_increment_reg;
     reg [48:0] pitch_product_reg;
-    reg [3:0] allocation_index;
+    reg [VOICE_INDEX_BITS-1:0] allocation_index;
 
     // The control engine first prepares a coherent snapshot for every voice.
     // It then submits eight 2-harmonic groups per voice to the tagged pipeline.
@@ -245,7 +246,7 @@ module midi_poly_synth #(
     reg [31:0]                  render_increment_snapshot [0:VOICE_COUNT-1];
     reg signed [31:0]           voice_harmonic_sum [0:VOICE_COUNT-1];
     reg signed [31:0]           pipeline_voice_accumulator;
-    reg [3:0]                   pipeline_issue_voice;
+    reg [VOICE_INDEX_BITS-1:0]  pipeline_issue_voice;
     reg [2:0]                   pipeline_issue_group;
     reg [3:0]                   render_epoch;
 
@@ -257,7 +258,7 @@ module midi_poly_synth #(
     reg [35:0]                   pipeline_first_increment;
     wire pipeline_in_valid = (engine_state == ENGINE_PIPELINE_ISSUE);
     wire pipeline_out_valid;
-    wire [3:0] pipeline_out_voice;
+    wire [VOICE_INDEX_BITS-1:0] pipeline_out_voice;
     wire [2:0] pipeline_out_group;
     wire [3:0] pipeline_out_epoch;
     wire pipeline_out_last_group;
@@ -268,7 +269,7 @@ module midi_poly_synth #(
         $signed({pipeline_out_group_sample[31], pipeline_out_group_sample});
 
     harmonic_render_pipeline #(
-        .VOICE_INDEX_BITS(4),
+        .VOICE_INDEX_BITS(VOICE_INDEX_BITS),
         .EPOCH_BITS(4),
         .HARMONIC_PHASE_LIMIT(HARMONIC_PHASE_LIMIT),
         .SINE_MEM(`TONE_QUARTER_SINE_MEM)
@@ -421,6 +422,7 @@ module midi_poly_synth #(
     reg [15:0] envelope_start_reg;
     reg        envelope_gate_reg;
     reg [15:0] calculated_envelope_level;
+    reg [31:0] calculated_envelope_phase;
     reg [15:0] pitch_envelope_ratio_reg;
 
     wire [16:0] attack_range = 17'd65535 - {1'b0, envelope_start_reg};
@@ -635,13 +637,13 @@ module midi_poly_synth #(
 
     integer i;
     integer key_scan_index;
-    reg [3:0] allocation_scan_index;
+    reg [VOICE_INDEX_BITS-1:0] allocation_scan_index;
     reg       same_note_found;
-    reg [3:0] same_note_index;
+    reg [VOICE_INDEX_BITS-1:0] same_note_index;
     reg       free_voice_found;
-    reg [3:0] free_voice_index;
+    reg [VOICE_INDEX_BITS-1:0] free_voice_index;
     reg [15:0] quietest_level;
-    reg [3:0] quietest_index;
+    reg [VOICE_INDEX_BITS-1:0] quietest_index;
     reg [6:0] allocation_note;
     reg [6:0] allocation_velocity;
     reg [6:0] allocation_brightness;
@@ -652,12 +654,13 @@ module midi_poly_synth #(
     reg [5:0] init_right_address;
     reg [15:0] init_left_amp;
     reg [15:0] init_interpolated_amp;
+    reg [31:0] init_filter_phase_inc;
     reg [6:0] master_volume_target;
     reg [6:0] master_volume_current;
     reg [7:0] event_status;
     reg [6:0] event_data1;
     reg [6:0] event_data2;
-    reg [3:0] last_voice_index;
+    reg [VOICE_INDEX_BITS-1:0] last_voice_index;
     reg allocation_legato;
     reg any_key_down;
     reg [31:0] glide_next_increment;
@@ -747,7 +750,7 @@ module midi_poly_synth #(
             event_pending       <= 1'b0;
             engine_state        <= ENGINE_IDLE;
             engine_watchdog     <= 16'd0;
-            voice_index         <= 4'd0;
+            voice_index         <= {VOICE_INDEX_BITS{1'b0}};
             init_harmonic_index <= 4'd0;
             audible_voice_count <= 5'd0;
             mix_accumulator     <= 39'sd0;
@@ -759,7 +762,7 @@ module midi_poly_synth #(
             vibrato_phase       <= 32'd0;
             pitch_ratio_address <= 9'd256;
             pitch_ratio_q16     <= 17'd65536;
-            pipeline_issue_voice <= 4'd0;
+            pipeline_issue_voice <= {VOICE_INDEX_BITS{1'b0}};
             pipeline_issue_group <= 3'd0;
             pipeline_fundamental_phase <= 32'd0;
             pipeline_fundamental_increment <= 32'd0;
@@ -781,19 +784,19 @@ module midi_poly_synth #(
             envelope_start_reg <= 16'd0;
             envelope_state_reg <= ENV_IDLE;
             envelope_gate_reg <= 1'b0;
-            render_envelope_count <= 32'd0;
             render_envelope_phase <= 32'd0;
             render_pitch_envelope_phase <= 32'd0;
             calculated_envelope_level <= 16'd0;
+            calculated_envelope_phase <= 32'd0;
             pitch_envelope_ratio_reg <= 16'h1000;
-            allocation_index      <= 4'd0;
-            allocation_scan_index <= 4'd0;
+            allocation_index      <= {VOICE_INDEX_BITS{1'b0}};
+            allocation_scan_index <= {VOICE_INDEX_BITS{1'b0}};
             same_note_found       <= 1'b0;
-            same_note_index       <= 4'd0;
+            same_note_index       <= {VOICE_INDEX_BITS{1'b0}};
             free_voice_found      <= 1'b0;
-            free_voice_index      <= 4'd0;
+            free_voice_index      <= {VOICE_INDEX_BITS{1'b0}};
             quietest_level        <= 16'hffff;
-            quietest_index        <= 4'd0;
+            quietest_index        <= {VOICE_INDEX_BITS{1'b0}};
             allocation_note       <= 7'd0;
             allocation_velocity   <= 7'd0;
             allocation_brightness <= 7'd127;
@@ -802,9 +805,10 @@ module midi_poly_synth #(
             harmonic_read_address  <= 6'd0;
             init_left_amp          <= 16'd0;
             init_interpolated_amp  <= 16'd0;
+            init_filter_phase_inc  <= 32'hffffffff;
             master_volume_target   <= DEFAULT_MASTER_VOLUME;
             master_volume_current  <= DEFAULT_MASTER_VOLUME;
-            last_voice_index       <= 4'd0;
+            last_voice_index       <= {VOICE_INDEX_BITS{1'b0}};
             allocation_legato      <= 1'b0;
             glide_current_reg      <= 32'd0;
             glide_target_reg       <= 32'd0;
@@ -819,7 +823,6 @@ module midi_poly_synth #(
                 voice_phase_increment[i] <= 32'd0;
                 voice_current_increment[i] <= 32'd0;
                 envelope_state[i]        <= ENV_IDLE;
-                envelope_count[i]        <= 32'd0;
                 envelope_phase[i]        <= 32'd0;
                 envelope_start[i]        <= 16'd0;
                 envelope_level[i]        <= 16'd0;
@@ -891,13 +894,13 @@ module midi_poly_synth #(
                             allocation_legato     <= (portamento_time != 0) &&
                                                      any_key_down &&
                                                      voice_active[last_voice_index];
-                            allocation_scan_index <= 4'd0;
+                            allocation_scan_index <= {VOICE_INDEX_BITS{1'b0}};
                             same_note_found       <= 1'b0;
-                            same_note_index       <= 4'd0;
+                            same_note_index       <= {VOICE_INDEX_BITS{1'b0}};
                             free_voice_found      <= 1'b0;
-                            free_voice_index      <= 4'd0;
+                            free_voice_index      <= {VOICE_INDEX_BITS{1'b0}};
                             quietest_level        <= 16'hffff;
-                            quietest_index        <= 4'd0;
+                            quietest_index        <= {VOICE_INDEX_BITS{1'b0}};
                             engine_state          <= ENGINE_ALLOC_SCAN;
                         end else if (((event_status & 8'hf0) == 8'h80) ||
                                      (((event_status & 8'hf0) == 8'h90) && (event_data2 == 0))) begin
@@ -929,7 +932,7 @@ module midi_poly_synth #(
                         end
                     end else if (sample_pending) begin
                         sample_pending      <= 1'b0;
-                        voice_index         <= 4'd0;
+                        voice_index         <= {VOICE_INDEX_BITS{1'b0}};
                         audible_voice_count <= 5'd0;
                         mix_accumulator     <= 39'sd0;
                         render_epoch        <= render_epoch + 1'b1;
@@ -989,7 +992,6 @@ module midi_poly_synth #(
                         voice_current_increment[allocation_index] <=
                             allocation_target_increment;
                         envelope_state[allocation_index] <= ENV_ATTACK;
-                        envelope_count[allocation_index] <= 32'd0;
                         envelope_phase[allocation_index] <= 32'd0;
                         envelope_start[allocation_index] <= 16'd0;
                         envelope_level[allocation_index] <= 16'd0;
@@ -1012,6 +1014,20 @@ module midi_poly_synth #(
                         init_anchor_fraction <= 5'd0;
                     end
                     init_harmonic_index <= 4'd0;
+                    engine_state <= ENGINE_INIT_FILTER_CALC;
+                end
+
+                // Calculate the note-dependent filter-envelope speed once,
+                // before the sixteen harmonic amplitudes are initialized.
+                // Keeping this result in a scalar pipeline register removes
+                // the interpolation arithmetic from the indexed voice-state
+                // write path, which was the post-route timing bottleneck at
+                // sixteen voices.
+                ENGINE_INIT_FILTER_CALC: begin
+                    init_filter_phase_inc <= interpolate_u32(
+                        filter_anchor_phase_inc[init_anchor_left],
+                        filter_anchor_phase_inc[init_anchor_right],
+                        init_anchor_fraction);
                     engine_state <= ENGINE_INIT_LEFT_ADDRESS;
                 end
 
@@ -1048,10 +1064,8 @@ module midi_poly_synth #(
                     if (init_harmonic_index == HARMONIC_COUNT - 1) begin
                         voice_filter_anchor[allocation_index] <= init_anchor_left;
                         voice_filter_fraction[allocation_index] <= init_anchor_fraction;
-                        voice_filter_phase_inc[allocation_index] <= interpolate_u32(
-                            filter_anchor_phase_inc[init_anchor_left],
-                            filter_anchor_phase_inc[init_anchor_right],
-                            init_anchor_fraction);
+                        voice_filter_phase_inc[allocation_index] <=
+                            init_filter_phase_inc;
                         engine_state <= ENGINE_IDLE;
                     end else begin
                         init_harmonic_index <= init_harmonic_index + 1'b1;
@@ -1062,7 +1076,7 @@ module midi_poly_synth #(
                 ENGINE_VOICE_PREPARE: begin
                     if (!voice_active[voice_index]) begin
                         if (voice_index == VOICE_COUNT - 1) begin
-                            pipeline_issue_voice <= 4'd0;
+                            pipeline_issue_voice <= {VOICE_INDEX_BITS{1'b0}};
                             pipeline_issue_group <= 3'd0;
                             engine_state <= ENGINE_PIPELINE_LOAD;
                         end else begin
@@ -1076,7 +1090,6 @@ module midi_poly_synth #(
                         envelope_start_reg <= envelope_start[voice_index];
                         envelope_state_reg <= envelope_state[voice_index];
                         envelope_gate_reg <= voice_gate[voice_index];
-                        render_envelope_count <= envelope_count[voice_index];
                         render_envelope_phase <= envelope_phase[voice_index];
                         render_pitch_envelope_phase <=
                             pitch_envelope_phase[voice_index];
@@ -1098,11 +1111,29 @@ module midi_poly_synth #(
 
                 ENGINE_ENVELOPE_CALC: begin
                     case (envelope_state_reg)
-                        ENV_ATTACK:  calculated_envelope_level <= attack_value[15:0];
-                        ENV_DECAY:   calculated_envelope_level <= decay_value[15:0];
-                        ENV_SUSTAIN: calculated_envelope_level <= amp_sustain_q16;
-                        ENV_RELEASE: calculated_envelope_level <= release_value;
-                        default:     calculated_envelope_level <= 16'd0;
+                        ENV_ATTACK: begin
+                            calculated_envelope_level <= attack_value[15:0];
+                            calculated_envelope_phase <= saturated_phase_add(
+                                render_envelope_phase, amp_attack_phase_inc);
+                        end
+                        ENV_DECAY: begin
+                            calculated_envelope_level <= decay_value[15:0];
+                            calculated_envelope_phase <= saturated_phase_add(
+                                render_envelope_phase, amp_decay_phase_inc);
+                        end
+                        ENV_SUSTAIN: begin
+                            calculated_envelope_level <= amp_sustain_q16;
+                            calculated_envelope_phase <= render_envelope_phase;
+                        end
+                        ENV_RELEASE: begin
+                            calculated_envelope_level <= release_value;
+                            calculated_envelope_phase <= saturated_phase_add(
+                                render_envelope_phase, amp_release_phase_inc);
+                        end
+                        default: begin
+                            calculated_envelope_level <= 16'd0;
+                            calculated_envelope_phase <= 32'd0;
+                        end
                     endcase
                     engine_state <= ENGINE_ENVELOPE_APPLY;
                 end
@@ -1111,47 +1142,46 @@ module midi_poly_synth #(
                     if (!envelope_gate_reg && (envelope_state_reg != ENV_RELEASE)) begin
                         envelope_state[voice_index] <= ENV_RELEASE;
                         envelope_start[voice_index] <= render_envelope_level;
-                        envelope_count[voice_index] <= 32'd0;
                         envelope_phase[voice_index] <= 32'd0;
                     end else begin
                         case (envelope_state_reg)
                             ENV_ATTACK: begin
                                 envelope_level[voice_index] <= calculated_envelope_level;
-                                if (render_envelope_count >= amp_attack_samples - 1) begin
+                                // The 32-bit phase itself is the stage timer.
+                                // Removing the redundant per-voice sample
+                                // counter saves 32 flip-flops per voice and,
+                                // more importantly, removes its wide indexed
+                                // compare/write mux from the critical path.
+                                if (render_envelope_phase == 32'hffffffff) begin
                                     envelope_level[voice_index] <= 16'hffff;
                                     envelope_state[voice_index] <= ENV_DECAY;
-                                    envelope_count[voice_index] <= 32'd0;
                                     envelope_phase[voice_index] <= 32'd0;
                                 end else begin
-                                    envelope_count[voice_index] <= render_envelope_count + 1'b1;
-                                    envelope_phase[voice_index] <= saturated_phase_add(
-                                        render_envelope_phase, amp_attack_phase_inc);
+                                    envelope_phase[voice_index] <=
+                                        calculated_envelope_phase;
                                 end
                             end
                             ENV_DECAY: begin
                                 envelope_level[voice_index] <= calculated_envelope_level;
-                                if (render_envelope_count >= amp_decay_samples - 1) begin
+                                if (render_envelope_phase == 32'hffffffff) begin
                                     envelope_level[voice_index] <= amp_sustain_q16;
                                     envelope_state[voice_index] <= ENV_SUSTAIN;
-                                    envelope_count[voice_index] <= 32'd0;
                                     envelope_phase[voice_index] <= 32'd0;
                                 end else begin
-                                    envelope_count[voice_index] <= render_envelope_count + 1'b1;
-                                    envelope_phase[voice_index] <= saturated_phase_add(
-                                        render_envelope_phase, amp_decay_phase_inc);
+                                    envelope_phase[voice_index] <=
+                                        calculated_envelope_phase;
                                 end
                             end
                             ENV_SUSTAIN: envelope_level[voice_index] <= amp_sustain_q16;
                             ENV_RELEASE: begin
                                 envelope_level[voice_index] <= calculated_envelope_level;
-                                if (render_envelope_count >= amp_release_samples - 1) begin
+                                if (render_envelope_phase == 32'hffffffff) begin
                                     envelope_level[voice_index] <= 16'd0;
                                     envelope_state[voice_index] <= ENV_IDLE;
                                     voice_active[voice_index] <= 1'b0;
                                 end else begin
-                                    envelope_count[voice_index] <= render_envelope_count + 1'b1;
-                                    envelope_phase[voice_index] <= saturated_phase_add(
-                                        render_envelope_phase, amp_release_phase_inc);
+                                    envelope_phase[voice_index] <=
+                                        calculated_envelope_phase;
                                 end
                             end
                             default: begin
@@ -1201,7 +1231,7 @@ module midi_poly_synth #(
                             pitch_envelope_phase_inc);
                     end
                     if (voice_index == VOICE_COUNT - 1) begin
-                        pipeline_issue_voice <= 4'd0;
+                        pipeline_issue_voice <= {VOICE_INDEX_BITS{1'b0}};
                         pipeline_issue_group <= 3'd0;
                         engine_state <= ENGINE_PIPELINE_LOAD;
                     end else begin
@@ -1248,7 +1278,7 @@ module midi_poly_synth #(
                         (pipeline_out_epoch == render_epoch) &&
                         (pipeline_out_voice == VOICE_COUNT - 1) &&
                         pipeline_out_last_group) begin
-                        voice_index <= 4'd0;
+                        voice_index <= {VOICE_INDEX_BITS{1'b0}};
                         mix_accumulator <= 39'sd0;
                         engine_state <= ENGINE_POST_PREPARE;
                     end

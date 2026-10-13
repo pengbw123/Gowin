@@ -58,15 +58,20 @@ module harmonic_render_pipeline #(
     reg signed [15:0] sine_quarter_1 [0:511];
 
     // 16 harmonics are banked by lane.  Address = {voice, group}.
-    reg [15:0] amplitude_bank_0 [0:127];
-    reg [15:0] amplitude_bank_1 [0:127];
+    // Deriving the depth from the voice tag width lets the same datapath
+    // scale past sixteen voices without changing the arithmetic pipeline.
+    localparam integer AMPLITUDE_ADDRESS_BITS = VOICE_INDEX_BITS + 3;
+    localparam integer AMPLITUDE_DEPTH = 1 << AMPLITUDE_ADDRESS_BITS;
+    reg [15:0] amplitude_bank_0 [0:AMPLITUDE_DEPTH-1];
+    reg [15:0] amplitude_bank_1 [0:AMPLITUDE_DEPTH-1];
 
     initial begin
         $readmemh(SINE_MEM, sine_quarter_0);
         $readmemh(SINE_MEM, sine_quarter_1);
     end
 
-    wire [6:0] amp_write_address = {amp_write_voice, amp_write_harmonic[3:1]};
+    wire [AMPLITUDE_ADDRESS_BITS-1:0] amp_write_address =
+        {amp_write_voice, amp_write_harmonic[3:1]};
     always @(posedge clk) begin
         if (amp_write_valid) begin
             if (amp_write_harmonic[0])
@@ -90,7 +95,7 @@ module harmonic_render_pipeline #(
     reg [VOICE_INDEX_BITS-1:0]  voice_p0;
     reg [2:0]                   group_p0;
     reg [EPOCH_BITS-1:0]        epoch_p0;
-    reg [6:0]                   amplitude_address_p0;
+    reg [AMPLITUDE_ADDRESS_BITS-1:0] amplitude_address_p0;
     reg [8:0]                   sine_address_0_p0;
     reg [8:0]                   sine_address_1_p0;
     reg [1:0]                   sine_negative_p0;

@@ -41,6 +41,9 @@ $hex = Join-Path $firmwareDir 'firmware.hex'
     -fno-builtin `
     -fno-pic `
     -fno-stack-protector `
+    -fno-unwind-tables `
+    -fno-asynchronous-unwind-tables `
+    -DNOPRINT `
     -fdata-sections `
     -ffunction-sections `
     -msmall-data-limit=0 `
@@ -56,8 +59,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Firmware link failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Firmware objcopy failed.' }
 
 $bytes = [System.IO.File]::ReadAllBytes($binary)
-if ($bytes.Length -gt 16384) {
-    throw "Firmware image is $($bytes.Length) bytes, larger than 16 KiB."
+if ($bytes.Length -gt 8192) {
+    throw "Firmware load image is $($bytes.Length) bytes, larger than the 8 KiB instruction ROM."
 }
 
 $lines = [System.Collections.Generic.List[string]]::new(4096)
@@ -73,5 +76,5 @@ for ($offset = 0; $offset -lt 16384; $offset += 4) {
 }
 [System.IO.File]::WriteAllLines($hex, $lines, [System.Text.Encoding]::ASCII)
 
-Write-Host "USB-MIDI firmware: $($bytes.Length) / 16384 bytes"
+Write-Host "USB-MIDI firmware: $($bytes.Length) / 8192 instruction-ROM bytes"
 Write-Host "Generated: $hex"

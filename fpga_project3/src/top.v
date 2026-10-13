@@ -334,7 +334,7 @@ module top (
     // Twelve voices is the timing-safe 25K profile.  The engine itself
     // remains parameterised; Mega 60K can raise this to 32 after widening the
     // voice index and increasing the two-lane render budget.
-    midi_poly_synth #(.VOICE_COUNT(12)) u_midi_poly_synth (
+    midi_poly_synth #(.VOICE_COUNT(16)) u_midi_poly_synth (
         .clk(clk),
         .reset_n(audio_reset_n),
         .sample_tick(sample_tick),

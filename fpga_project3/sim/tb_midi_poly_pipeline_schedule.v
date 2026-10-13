@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-// Worst-case control-schedule check for the production 12-voice build.
+// Worst-case control-schedule check for the production 16-voice build.
 // All voices are active and the two-pole dynamic filter is enabled.
 module tb_midi_poly_pipeline_schedule;
     reg clk = 1'b0;
@@ -14,7 +14,7 @@ module tb_midi_poly_pipeline_schedule;
 
     always #10 clk = ~clk;
 
-    midi_poly_synth #(.VOICE_COUNT(12)) dut (
+    midi_poly_synth #(.VOICE_COUNT(16)) dut (
         .clk(clk), .reset_n(reset_n), .sample_tick(sample_tick),
         .midi_event_data(midi_event_data),
         .midi_event_valid(midi_event_valid),
@@ -81,7 +81,7 @@ module tb_midi_poly_pipeline_schedule;
         reset_n = 1'b1;
         repeat (5) @(posedge clk);
 
-        for (note_index = 0; note_index < 12; note_index = note_index + 1)
+        for (note_index = 0; note_index < 16; note_index = note_index + 1)
             send_note(7'd48 + note_index[6:0]);
 
         @(negedge clk);
@@ -98,21 +98,21 @@ module tb_midi_poly_pipeline_schedule;
         repeat (2) @(posedge clk);
 
         internal_active_count = 0;
-        for (note_index = 0; note_index < 12; note_index = note_index + 1)
+        for (note_index = 0; note_index < 16; note_index = note_index + 1)
             if (dut.voice_active[note_index])
                 internal_active_count = internal_active_count + 1;
         $display("PIPELINE_RENDER_CYCLES=%0d active_state=%0d audible=%0d sample=%0d",
                  render_cycles, internal_active_count,
                  active_voice_count, sample_out);
-        if (render_cycles > 400) begin
-            $display("FAIL: 12-voice render exceeded 400 clocks");
+        if (render_cycles > 600) begin
+            $display("FAIL: 16-voice render exceeded 600 clocks");
             $fatal(1);
         end
-        if (internal_active_count != 12) begin
-            $display("FAIL: expected 12 allocated voices");
+        if (internal_active_count != 16) begin
+            $display("FAIL: expected 16 allocated voices");
             $fatal(1);
         end
-        $display("PASS: 12-voice true-pipeline schedule");
+        $display("PASS: 16-voice true-pipeline schedule");
         $finish;
     end
 

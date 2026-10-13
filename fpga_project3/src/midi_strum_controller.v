@@ -84,6 +84,7 @@ module midi_strum_controller #(
     reg        next_note_due;
     reg        stroke_busy;
     reg [6:0]  prepared_note;
+    reg [2:0]  prepared_stroke_index;
     reg [2:0]  prepared_release_index;
     reg        note_release_lookup_pending;
     reg        note_emit_pending;
@@ -284,6 +285,7 @@ module midi_strum_controller #(
             next_note_due <= 1'b0;
             stroke_busy <= 1'b0;
             prepared_note <= 7'd0;
+            prepared_stroke_index <= 3'd0;
             prepared_release_index <= 3'd0;
             note_release_lookup_pending <= 1'b0;
             note_emit_pending <= 1'b0;
@@ -421,10 +423,16 @@ module midi_strum_controller #(
                 if (next_note_due && selected_found &&
                     !note_release_lookup_pending && !note_emit_pending) begin
                     prepared_note <= selected_note;
-                    stroke_used[selected_index] <= 1'b1;
+                    prepared_stroke_index <= selected_index;
                     next_note_due <= 1'b0;
                     note_release_lookup_pending <= 1'b1;
                 end else if (note_release_lookup_pending) begin
+                    // The sorted-note search and the indexed used-bit write
+                    // are deliberately separated by this register boundary.
+                    // This removes the former stroke_note -> priority select
+                    // -> stroke_used critical path without changing timing at
+                    // the millisecond-scale strum output.
+                    stroke_used[prepared_stroke_index] <= 1'b1;
                     prepared_release_index <= selected_release_index;
                     note_release_lookup_pending <= 1'b0;
                     note_emit_pending <= 1'b1;

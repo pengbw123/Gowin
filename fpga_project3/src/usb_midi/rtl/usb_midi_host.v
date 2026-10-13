@@ -1,7 +1,4 @@
 // Tang Primer 25K USB 1.1 full-speed host with a tiny RV32I firmware core.
-`ifndef GW_IDE
-`define GW_IDE
-`endif
 //
 // The USB controller and CPU run at 48 MHz.  MIDI messages cross into the
 // 50 MHz audio clock domain through a request/acknowledge toggle mailbox.
@@ -51,7 +48,7 @@ module usb_midi_host (
 
     RV32I u_cpu (
         .CLK(clk_48m),
-`ifdef GW_IDE
+`ifdef USB_USE_DUAL_CLOCK_BRAM_HACK
         .clk_2x(clk_cpu_bram_96m),
 `endif
         .RST_X(reset_n),

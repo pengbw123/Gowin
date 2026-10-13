@@ -1,11 +1,11 @@
 // RISCV microcontroller, extracted from the RVSoC project of the Kise Lab of
 // the University of Tokyo. BSD License.
 
-// The GW5A-25K dual-port BRAM cannot implement the generic read-before-write
-// inference below. Select the board-specific 48/96 MHz implementation.
-`ifndef GW_IDE
-`define GW_IDE
-`endif
+// Keep instruction and data ports in the CPU's 48 MHz clock domain.  The old
+// board-specific implementation borrowed a phase-shifted 96 MHz edge for the
+// data port; that crossing was not covered by static timing and became
+// placement-sensitive as the audio design grew.  Define the legacy macro only
+// for controlled experiments; production uses the single-clock true-DP RAM.
 
 
 // 2-ported register file
@@ -182,7 +182,7 @@ endmodule
 //
 module RV32I (
     input  wire         CLK,          // clock
-`ifdef GW_IDE
+`ifdef USB_USE_DUAL_CLOCK_BRAM_HACK
     input  wire         clk_2x,       // 2x clock with +45 deg phase for emulating read-before-write memory
 `endif
     input  wire         RST_X,        // nReset
@@ -364,7 +364,7 @@ module RV32I (
     m_lm_mc lm_mc
     (
         CLK, 
-`ifdef GW_IDE
+`ifdef USB_USE_DUAL_CLOCK_BRAM_HACK
         clk_2x,
 `endif
         w_mic_insn_addr[`D_UC_LM_BITS-1:2], w_odata1,
@@ -382,10 +382,10 @@ module RV32I (
 
 endmodule
 
-// Dual ported BRAM for controller local memory, preloaded with code
+// Controller local memory, preloaded with code and initialized data.
 //
 
-`ifndef GW_IDE
+`ifndef USB_USE_DUAL_CLOCK_BRAM_HACK
 module m_lm_mc(
     input  wire                         CLK,
 
@@ -398,26 +398,42 @@ module m_lm_mc(
     input  wire                  [31:0] w_idata
   );
 
-    reg [31:0] mem[0:(`D_UC_LM_SIZE/4)-1];
+    // GW5A-25B cannot place the inferred true-dual-port read-before-write
+    // memory used by the original core.  Keep an instruction image and a
+    // data image instead.  The firmware never modifies instructions, while
+    // constants/globals remain visible through the independently initialized
+    // data image.  Both ports are now ordinary, fully timed 48 MHz memories.
+    // Verbose descriptor dumps are omitted in the production firmware so its
+    // load image fits an 8 KiB instruction ROM (four 18-Kbit BSRAMs).
+    localparam integer INSTRUCTION_WORDS = 2048;
+    reg [31:0] instruction_mem[0:INSTRUCTION_WORDS-1];
+    reg [31:0] data_mem[0:(`D_UC_LM_SIZE/4)-1];
 
     initial begin
-        $readmemh("src/usb_midi/firmware/firmware.hex", mem);
+        $readmemh("src/usb_midi/firmware/firmware.hex", instruction_mem,
+                  0, INSTRUCTION_WORDS-1);
+        $readmemh("src/usb_midi/firmware/firmware.hex", data_mem);
     end
 
     always @(posedge CLK) begin
-        r_odata1 <= mem[w_addr1];
+        r_odata1 <= instruction_mem[w_addr1[10:0]];
     end
 
     always @(posedge CLK) begin
-        if (w_we[0]) mem[w_addr2][ 7: 0] <= w_idata[ 7: 0];
-        if (w_we[1]) mem[w_addr2][15: 8] <= w_idata[15: 8];
-        if (w_we[2]) mem[w_addr2][23:16] <= w_idata[23:16];
-        if (w_we[3]) mem[w_addr2][31:24] <= w_idata[31:24];
-        r_odata2 <= mem[w_addr2];
+        if (|w_we) begin
+            // Stores do not consume the data-port read result, so do not read
+            // this RAM on a write cycle.  This maps to normal/no-change mode.
+            if (w_we[0]) data_mem[w_addr2][ 7: 0] <= w_idata[ 7: 0];
+            if (w_we[1]) data_mem[w_addr2][15: 8] <= w_idata[15: 8];
+            if (w_we[2]) data_mem[w_addr2][23:16] <= w_idata[23:16];
+            if (w_we[3]) data_mem[w_addr2][31:24] <= w_idata[31:24];
+        end else begin
+            r_odata2 <= data_mem[w_addr2];
+        end
     end
 
 endmodule
-`else //GW_IDE
+`else // USB_USE_DUAL_CLOCK_BRAM_HACK
 module m_lm_mc
 (
     input  wire                         CLK,

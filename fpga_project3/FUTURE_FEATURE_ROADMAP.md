@@ -1,6 +1,6 @@
 # 后续功能路线（已确认）
 
-> `fpga_project3` 已完成Pitch Bend、Vibrato、Portamento、Chorus、Reverb、12复音双路加法合成和四基准动态低通第一版RTL；Delay已为25K资源优化而移除。以下内容保留为实板试听后的优化路线。
+> `fpga_project3` 已完成Pitch Bend、Vibrato、Portamento、Chorus、Reverb、16复音双路加法合成和四基准动态低通第一版RTL；Delay已为25K资源优化而移除。以下内容保留为实板试听后的优化路线。
 
 ## 表情控制
 

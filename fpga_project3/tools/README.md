@@ -1,36 +1,41 @@
 # Tools目录导航
 
-现有程序按用途分为三组。为避免破坏已经验证过的启动方式，本次不移动旧文件，只增加统一说明和阶段二入口。
+工具已经按用途分目录。日常使用只需双击根目录下的`run_tools_menu.bat`，不必进入各源码目录寻找程序。
 
-不想区分文件名时可直接运行`run_tools_menu.bat`，用数字选择音色编辑器、阶段一或阶段二。保留所有旧入口是为了不破坏已经验证过的脚本和README路径。
+```text
+tools/
+├─ run_tools_menu.bat      统一启动菜单
+├─ apps/                   图形界面程序
+├─ core/                   UART、MIDI、包络和分析公共模块
+├─ generators/             FPGA初始化表生成器
+├─ cli/                    命令行调试工具
+├─ tests/                  自动测试
+├─ presets/                音色JSON预设
+├─ launchers/              各程序的独立启动脚本
+├─ midi_library/           用户本地MIDI曲库（歌曲不提交Git）
+└─ library/audiofiles/     用户本地乐器录音（不提交Git）
+```
 
 ## 直接运行的程序
 
 | 阶段 | 启动文件 | 用途 |
 |---|---|---|
-| FPGA音色编辑 | `run_harmonic_editor.bat` | 编辑四基准谐波、动态滤波、幅度ADSR与Pitch包络，试听并通过UART发送 |
-| MIDI演奏器 | `run_uart_midi_player.bat` | 通过串口播放标准MIDI曲目、全音域可视琴键与鼠标试音 |
-| 阶段一 | `run_instrument_analyzer.bat` | 分析一个真实乐器单音，观察热力图、32谐波绝对幅度和绝对衰减 |
-| 阶段二 | `run_timbre_builder.bat` | 同时分析C2/C3/C4/C6，分离总包络和相对谐波衰减，A/B试听并导出FPGA参数 |
+| FPGA音色编辑 | `launchers/run_harmonic_editor.bat` | 编辑四基准谐波、动态滤波、幅度ADSR、Pitch包络及键位响度曲线，试听并通过UART发送 |
+| MIDI演奏器 | `launchers/run_uart_midi_player.bat` | 通过串口播放标准MIDI曲目、全音域可视琴键与鼠标试音 |
+| 阶段一 | `launchers/run_instrument_analyzer.bat` | 分析一个真实乐器单音，观察热力图、32谐波绝对幅度和绝对衰减 |
+| 阶段二 | `launchers/run_timbre_builder.bat` | 同时分析C2/C3/C4/C6，分离总包络和相对谐波衰减，A/B试听并导出FPGA参数 |
 
-首次运行任一图形程序前执行一次`install_python_requirements.bat`。
+首次运行任一图形程序前执行一次`launchers/install_python_requirements.bat`。
 
 ## 程序与公共模块
 
-- `instrument_spectrum_analyzer.py`：阶段一界面，作为已保存基线不再承担阶段二逻辑；
-- `instrument_analysis_core.py`：STFT、基频跟踪和绝对谐波测量；
-- `instrument_timbre_builder.py`：阶段二四基准界面；
-- `instrument_timbre_builder_core.py`：总包络分离、相对衰减拟合和Q0.24系数生成；
-- `harmonic_editor.py`：现有UART音色编辑器；
-- `envelope_tools.py`：幅度ADSR/Pitch包络归一化、定点转换和试听合成；
-- `additive_uart_protocol.py`：UART数据包和参数换算；
-- `generate_additive_tables.py`、`generate_midi_phase_table.py`：生成FPGA初始化表；
-- `uart_synth_control.py`：命令行UART调试工具；
-- `uart_midi_player.py`：全音域MIDI文件播放器；读取歌曲的速度变化、音符、力度和延音踏板，通过UART实时送入FPGA；
-- `midi_player_core.py`：把多轨MIDI合并为绝对时间事件，处理速度变化、移调和力度；
+- `apps/`：四个图形界面程序；
+- `core/`：UART、MIDI、包络、STFT和音色分析公共模块；
+- `generators/`：FPGA初始化表生成器；
+- `cli/uart_synth_control.py`：命令行UART调试工具；
 - `midi_library/`：授权信息明确的内置示例以及用户自备MIDI的默认目录；
-- `test_*.py`：参数提取单元测试；
-- `audiofiles/`：用户自己的参考录音，不属于程序依赖。
+- `tests/`：参数提取和协议单元测试；
+- `library/audiofiles/`：用户自己的参考录音，不属于程序依赖，也不会提交Git。
 
 ## 旧版独立衰减数据与当前动态滤波
 
@@ -56,7 +61,7 @@ R_k(t) = H_k(t) / G(t)
 
 ## 吉他扫弦模式
 
-`harmonic_editor.py`顶部的“演奏方式”区域可以切换普通演奏和吉他扫弦。扫弦模式下先在MIDI键盘上按住3～4个音形成和弦，再使用Pad 1下扫、Pad 2上扫。Pad力度主要控制音量，同时影响弦间隔和高次谐波亮度。
+`apps/harmonic_editor.py`顶部的“演奏方式”区域可以切换普通演奏和吉他扫弦。扫弦模式下先在MIDI键盘上按住3～4个音形成和弦，再使用Pad 1下扫、Pad 2上扫。Pad力度主要控制音量，同时影响弦间隔和高次谐波亮度。
 
 - `弦间隔`：相邻和弦音触发的基础时间，推荐12～25 ms；
 - `Gate`：每个音从Note On到Note Off的时间，推荐80～180 ms；
@@ -79,9 +84,15 @@ R_k(t) = H_k(t) / G(t)
 
 默认Pitch表全部为0半音，因此未编辑时不会改变原音高。当前25K资源较紧，先使用单活动表；迁移Mega60K后可增加双缓冲和原子切换。
 
+## 键位响度补偿
+
+音色编辑器顶部的“响度曲线”使用C0～C8九个可拖动控制点，范围为−12～+12 dB。PC在dB域把九点插值成MIDI 0～127的128个Q2.14增益，再通过CMD 0x54写入FPGA备用RAM，最后用CMD 0x55一次切换活动表。传输过程中不会出现半张新表、半张旧表；已经发声的复音保留Note On时锁存的增益，新按下的音符使用新曲线。
+
+“恢复校准曲线”补偿当前四基准谐波的RMS差异并适度补偿小扬声器低频：“平坦0 dB”可用于A/B比较。曲线随音色JSON保存；“发送全部”会一并实时下载，“导出上电默认”会更新`src/generated/midi_note_gain_q14.mem`。
+
 ## 串口MIDI演奏器
 
-先重新综合并烧录包含UART MIDI命令的本工程，再运行`run_uart_midi_player.bat`。选择与BL616调试串口对应的COM口、连接，然后载入曲目播放。
+先重新综合并烧录包含UART MIDI命令的本工程，再运行`launchers/run_uart_midi_player.bat`。选择与BL616调试串口对应的COM口、连接，然后载入曲目播放。
 
 稳定性注意：播放器只显示硬件USB串口并过滤Windows蓝牙虚拟COM口，也绝不自动选中第一个端口。请手动选择“之前用串口助手能看到USB Host心跳”的板载COM口。打开前DTR/RTS保持为低，软件不再创建后台串口读取线程，停止播放也不会关闭串口；只有点击“断开”、退出或发生写入错误才会在互斥保护下关闭一次句柄。连接时会主动发送普通演奏模式，避免上一次扫弦设置让实体琴键只记录和弦而不发声。
 
@@ -91,4 +102,4 @@ R_k(t) = H_k(t) / G(t)
 - 软件保留MIDI力度和CC64延音踏板，并提供速度、±24半音移调、力度比例、忽略鼓组通道；
 - 暂停、停止、跳转和退出均发送Sustain Off与All Notes Off，避免挂音；
 - 当前硬件合成器为12复音。曲目峰值复音超过12时，板端按照现有声部抢占规则播放；Release尾音也会占用声部；
-- 首次运行前执行`install_python_requirements.bat`安装`mido`和`pyserial`。
+- 首次运行前执行`launchers/install_python_requirements.bat`安装`mido`和`pyserial`。

@@ -22,6 +22,8 @@
 //   51:       filter-envelope point {anchor:u8, address:u8, cutoff_code:u8}
 //   52:       filter-envelope time {anchor:u8, phase_inc:u32, reserved[3]}
 //   53:       dynamic filter {enable:u8, two_pole:u8, reserved[6]}
+//   54:       note loudness staging point {note:u8, gain_q2_14:u16, reserved[5]}
+//   55:       atomically commit the complete 128-note loudness table
 //   30:       injected MIDI event {status:u8, data1:u8, data2:u8,
 //                                 brightness:u8, reserved[4]}
 //             valid is held until midi_event_ready acknowledges the event.
@@ -73,6 +75,11 @@ module synth_uart_control #(
     output reg  [31:0] filter_time_write_phase_inc,
     output reg         filter_enable,
     output reg         filter_two_pole,
+
+    output reg         note_gain_write_valid,
+    output reg  [6:0]  note_gain_write_address,
+    output reg  [15:0] note_gain_write_value,
+    output reg         note_gain_commit,
 
     output reg         strum_mode,
     output reg  [15:0] strum_interval_ms,
@@ -154,6 +161,10 @@ module synth_uart_control #(
             filter_time_write_phase_inc <= 32'd0;
             filter_enable             <= FILTER_ENABLE;
             filter_two_pole           <= FILTER_TWO_POLE;
+            note_gain_write_valid     <= 1'b0;
+            note_gain_write_address   <= 7'd0;
+            note_gain_write_value     <= 16'd0;
+            note_gain_commit          <= 1'b0;
             strum_mode                <= 1'b0;
             strum_interval_ms         <= 16'd18;
             strum_gate_ms             <= 16'd120;
@@ -170,6 +181,8 @@ module synth_uart_control #(
             harmonic_commit      <= 1'b0;
             filter_write_valid   <= 1'b0;
             filter_time_write_valid <= 1'b0;
+            note_gain_write_valid <= 1'b0;
+            note_gain_commit      <= 1'b0;
             packet_received      <= 1'b0;
             packet_error         <= 1'b0;
 
@@ -310,6 +323,16 @@ module synth_uart_control #(
                                     filter_enable   <= payload[0];
                                     filter_two_pole <= payload[8];
                                 end
+                                8'h54: begin
+                                    if (payload[7:0] < 128) begin
+                                        note_gain_write_valid   <= 1'b1;
+                                        note_gain_write_address <= payload[6:0];
+                                        note_gain_write_value   <= payload[23:8];
+                                    end else begin
+                                        packet_error <= 1'b1;
+                                    end
+                                end
+                                8'h55: note_gain_commit <= 1'b1;
                                 default: packet_error <= 1'b1;
                             endcase
                         end

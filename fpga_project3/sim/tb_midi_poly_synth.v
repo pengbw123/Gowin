@@ -8,7 +8,7 @@ module tb_midi_poly_synth;
     reg midi_event_valid = 1'b0;
     wire midi_event_ready;
     wire signed [15:0] sample_out;
-    wire [3:0] active_voice_count;
+    wire [4:0] active_voice_count;
 
     always #10 clk = ~clk;
 
@@ -38,6 +38,19 @@ module tb_midi_poly_synth;
         .harmonic_write_index(4'd0),
         .harmonic_write_value(24'd0),
         .harmonic_commit(1'b0),
+        .filter_write_valid(1'b0),
+        .filter_write_anchor(2'd0),
+        .filter_write_address(6'd0),
+        .filter_write_value(8'd0),
+        .filter_time_write_valid(1'b0),
+        .filter_time_write_anchor(2'd0),
+        .filter_time_write_phase_inc(32'd0),
+        .filter_enable(1'b0),
+        .filter_two_pole(1'b0),
+        .note_gain_write_valid(1'b0),
+        .note_gain_write_address(7'd0),
+        .note_gain_write_value(16'd0),
+        .note_gain_commit(1'b0),
         .pitch_bend(14'd8192),
         .vibrato_depth(7'd0),
         .vibrato_rate(7'd64),
@@ -77,10 +90,14 @@ module tb_midi_poly_synth;
                      dut.voice_phase_increment[voice],
                      dut.envelope_state[voice]);
             for (harmonic = 0; harmonic < 16; harmonic = harmonic + 1)
-                $display("  H%0d level=%08x decay=%06x",
-                         harmonic + 1,
-                         dut.partial_level[voice * 16 + harmonic],
-                         dut.partial_decay[voice * 16 + harmonic]);
+                case (harmonic & 1)
+                    0: $display("  H%0d level=%04x", harmonic + 1,
+                        dut.u_harmonic_render_pipeline.amplitude_bank_0[
+                            voice * 8 + (harmonic >> 1)]);
+                    1: $display("  H%0d level=%04x", harmonic + 1,
+                        dut.u_harmonic_render_pipeline.amplitude_bank_1[
+                            voice * 8 + (harmonic >> 1)]);
+                endcase
         end
     endtask
 
@@ -113,7 +130,8 @@ module tb_midi_poly_synth;
         wait_engine_idle();
         print_voice(5);
 
-        if ((dut.partial_level[16] == 0) || (dut.partial_level[32] == 0)) begin
+        if ((dut.u_harmonic_render_pipeline.amplitude_bank_0[8] == 0) ||
+            (dut.u_harmonic_render_pipeline.amplitude_bank_0[16] == 0)) begin
             $display("FAIL: non-C fundamental is zero");
             $fatal(1);
         end
@@ -122,15 +140,27 @@ module tb_midi_poly_synth;
             $display("FAIL: non-C phase increment is zero");
             $fatal(1);
         end
-        if (dut.partial_level[16] == dut.partial_level[32]) begin
+        if (dut.u_harmonic_render_pipeline.amplitude_bank_0[8] ==
+            dut.u_harmonic_render_pipeline.amplitude_bank_0[16]) begin
             $display("FAIL: C#4 and D4 share the same Q0.5 timbre position");
             $fatal(1);
         end
-        if ((dut.partial_level[48] == 0) || (dut.partial_level[64] == 0) ||
-            (dut.partial_level[80] == 0)) begin
+        if ((dut.u_harmonic_render_pipeline.amplitude_bank_0[24] == 0) ||
+            (dut.u_harmonic_render_pipeline.amplitude_bank_0[32] == 0) ||
+            (dut.u_harmonic_render_pipeline.amplitude_bank_0[40] == 0)) begin
             $display("FAIL: C2/C5/C6 anchor coverage is zero");
             $fatal(1);
         end
+        // Harmonic anchors describe timbre; an independent note-gain ROM
+        // compensates their measured RMS-energy difference at Note On.
+        if (!((dut.voice_velocity_gain[4] > dut.voice_velocity_gain[0]) &&
+              (dut.voice_velocity_gain[0] > dut.voice_velocity_gain[5]))) begin
+            $display("FAIL: note loudness compensation is not C2 > C4 > C6");
+            $fatal(1);
+        end
+        $display("NOTE GAINS: C2=%0d C4=%0d C6=%0d",
+                 dut.voice_velocity_gain[4], dut.voice_velocity_gain[0],
+                 dut.voice_velocity_gain[5]);
         $display("PASS: C2/C3/C4/C6 anchors and two-octave interpolation initialized");
         $finish;
     end

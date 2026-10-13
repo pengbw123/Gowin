@@ -14,10 +14,10 @@ echo [5] UART full-range MIDI song player
 echo [0] Exit
 echo.
 set /p tool_choice=Select: 
-if "%tool_choice%"=="1" call run_harmonic_editor.bat
-if "%tool_choice%"=="2" call run_instrument_analyzer.bat
-if "%tool_choice%"=="3" call run_timbre_builder.bat
-if "%tool_choice%"=="4" call install_python_requirements.bat
-if "%tool_choice%"=="5" call run_uart_midi_player.bat
+if "%tool_choice%"=="1" call launchers\run_harmonic_editor.bat
+if "%tool_choice%"=="2" call launchers\run_instrument_analyzer.bat
+if "%tool_choice%"=="3" call launchers\run_timbre_builder.bat
+if "%tool_choice%"=="4" call launchers\install_python_requirements.bat
+if "%tool_choice%"=="5" call launchers\run_uart_midi_player.bat
 if "%tool_choice%"=="0" exit /b 0
 goto menu

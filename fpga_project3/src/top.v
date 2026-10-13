@@ -198,6 +198,10 @@ module top (
     wire [31:0] filter_time_write_phase_inc;
     wire        filter_enable;
     wire        filter_two_pole;
+    wire        note_gain_write_valid;
+    wire [6:0]  note_gain_write_address;
+    wire [15:0] note_gain_write_value;
+    wire        note_gain_commit;
     wire        strum_mode;
     wire [15:0] strum_interval_ms;
     wire [15:0] strum_gate_ms;
@@ -254,6 +258,10 @@ module top (
         .filter_time_write_phase_inc(filter_time_write_phase_inc),
         .filter_enable(filter_enable),
         .filter_two_pole(filter_two_pole),
+        .note_gain_write_valid(note_gain_write_valid),
+        .note_gain_write_address(note_gain_write_address),
+        .note_gain_write_value(note_gain_write_value),
+        .note_gain_commit(note_gain_commit),
         .strum_mode(strum_mode),
         .strum_interval_ms(strum_interval_ms),
         .strum_gate_ms(strum_gate_ms),
@@ -361,6 +369,10 @@ module top (
         .filter_time_write_phase_inc(filter_time_write_phase_inc),
         .filter_enable(filter_enable),
         .filter_two_pole(filter_two_pole),
+        .note_gain_write_valid(note_gain_write_valid),
+        .note_gain_write_address(note_gain_write_address),
+        .note_gain_write_value(note_gain_write_value),
+        .note_gain_commit(note_gain_commit),
         .pitch_bend(pitch_bend),
         .vibrato_depth(vibrato_depth),
         .vibrato_rate(vibrato_rate),

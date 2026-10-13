@@ -8,7 +8,7 @@ module tb_midi_poly_audio;
     reg midi_event_valid = 1'b0;
     wire midi_event_ready;
     wire signed [15:0] sample_out;
-    wire [3:0] active_voice_count;
+    wire [4:0] active_voice_count;
 
     always #10 clk = ~clk;
 
@@ -33,6 +33,13 @@ module tb_midi_poly_audio;
         .harmonic_write_valid(1'b0), .harmonic_write_decay(1'b0),
         .harmonic_write_anchor(2'd0), .harmonic_write_index(4'd0),
         .harmonic_write_value(24'd0), .harmonic_commit(1'b0),
+        .filter_write_valid(1'b0), .filter_write_anchor(2'd0),
+        .filter_write_address(6'd0), .filter_write_value(8'd0),
+        .filter_time_write_valid(1'b0), .filter_time_write_anchor(2'd0),
+        .filter_time_write_phase_inc(32'd0),
+        .filter_enable(1'b0), .filter_two_pole(1'b0),
+        .note_gain_write_valid(1'b0), .note_gain_write_address(7'd0),
+        .note_gain_write_value(16'd0), .note_gain_commit(1'b0),
         .pitch_bend(14'd8192), .vibrato_depth(7'd0),
         .vibrato_rate(7'd64), .portamento_time(7'd0),
         .sample_out(sample_out), .active_voice_count(active_voice_count)

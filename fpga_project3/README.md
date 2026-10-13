@@ -102,7 +102,7 @@ Portamento只在LATCH非零且新音以连奏方式按下时启动。此时复�
 
 两个接收端可以同时观察 `uart_rx_pin`，不需要增加新的引脚。使用上位机时必须先关闭占用同一COM口的串口助手。
 
-除音色参数编辑外，当前UART还可注入标准MIDI事件。运行`tools/run_uart_midi_player.bat`后可播放任意标准`.mid/.midi`，歌曲音符使用MIDI 0～127完整范围，不受实体25键当前OCT档位限制。软件显示歌曲音域、峰值复音和全音域琴键，支持播放/暂停/停止/跳转、0.5～1.5倍速度、±24半音移调、力度比例和鼠标试音。暂停、停止、跳转或退出都会发送延音关闭和All Notes Off。
+除音色参数编辑外，当前UART还可注入标准MIDI事件。运行`tools/launchers/run_uart_midi_player.bat`后可播放任意标准`.mid/.midi`，歌曲音符使用MIDI 0～127完整范围，不受实体25键当前OCT档位限制。软件显示歌曲音域、峰值复音和全音域琴键，支持播放/暂停/停止/跳转、0.5～1.5倍速度、±24半音移调、力度比例和鼠标试音。暂停、停止、跳转或退出都会发送延音关闭和All Notes Off。
 
 串口歌曲与USB键盘在合成器入口处仲裁：上位机自动演奏时，实体键盘仍然在线，MODE旋钮的CC20仍控制板端总音量。当前音源为12复音，复杂MIDI超过12个同时音符（包含Release尾音）时会触发现有声部抢占。
 
@@ -110,8 +110,8 @@ Portamento只在LATCH非零且新音以连奏方式按下时启动。此时复�
 
 ```powershell
 cd tools
-.\install_python_requirements.bat
-.\run_harmonic_editor.bat
+.\launchers\install_python_requirements.bat
+.\launchers\run_harmonic_editor.bat
 ```
 
 编辑器启动所用的那个Python必须安装`pyserial`。其他串口助手能够看到COM口，并不代表这个Python环境已经装好串口库。编辑器在缺少`pyserial`时会用Windows接口尝试列出COM名并给出提示，但发送仍需先执行安装脚本；串口框也允许直接输入`COM11`一类端口名。
@@ -136,12 +136,12 @@ cd tools
 
 ## 乐器录音频谱分析器（第一阶段）
 
-`tools/instrument_spectrum_analyzer.py`用于从真实乐器的单音录音中提取音色参数，和UART谐波编辑器相互独立，不会占用串口或修改FPGA参数。启动：
+`tools/apps/instrument_spectrum_analyzer.py`用于从真实乐器的单音录音中提取音色参数，和UART谐波编辑器相互独立，不会占用串口或修改FPGA参数。启动：
 
 ```powershell
 cd tools
-.\install_python_requirements.bat
-.\run_instrument_analyzer.bat
+.\launchers\install_python_requirements.bat
+.\launchers\run_instrument_analyzer.bat
 ```
 
 输入支持WAV、AIFF/AIF和FLAC。推荐使用University of Iowa Musical Instrument Samples中的单声道录音，尤其是吉他的`Guitar.mono.2496.zip`；不要优先使用MP3，因为有损压缩会改变高频频谱。
@@ -172,7 +172,7 @@ cd tools
 
 ```powershell
 cd tools
-.\run_timbre_builder.bat
+.\launchers\run_timbre_builder.bat
 ```
 
 程序固定采用C2/C3/C4/C6四个基准，可分别选择单音录音和有效时间范围。完成分析后会显示四组32谐波起始柱状图，以及每项的绝对衰减、相对衰减和最终Q0.24系数；可以对选中基准进行原声、16谐波和32谐波A/B试听，并导出`gowin-relative-timbre-v2` JSON。
@@ -200,10 +200,11 @@ cd tools
 命令行示例：
 
 ```powershell
-python .\tools\uart_synth_control.py COM11 send-preset .\tools\instrument_4anchor_relative_decay.json
-python .\tools\uart_synth_control.py COM11 harmonic-amp C4 3 0.25 --commit
-python .\tools\uart_synth_control.py COM11 harmonic-decay C4 3 1800 --commit
-python .\tools\uart_synth_control.py COM11 adsr 30 500 0.18 800
+cd tools
+python -m cli.uart_synth_control COM11 send-preset .\presets\instrument_4anchor_relative_decay.json
+python -m cli.uart_synth_control COM11 harmonic-amp C4 3 0.25 --commit
+python -m cli.uart_synth_control COM11 harmonic-decay C4 3 1800 --commit
+python -m cli.uart_synth_control COM11 adsr 30 500 0.18 800
 ```
 
 协议为固定12字节：
@@ -231,24 +232,28 @@ CHECKSUM = XOR(CMD, DATA0..DATA7)
 | `51` | 滤波基准、64点地址、对数截止频率编码 |
 | `52` | 滤波基准和包络遍历相位步进 |
 | `53` | 动态滤波启用及6/12 dB/oct配置 |
+| `54` | 备用响度表地址与Q2.14增益值 |
+| `55` | 原子提交完整128音符响度表 |
 
 ## 默认音色文件
 
-- `tools/instrument_4anchor_relative_decay.json`：当前上电及上位机默认音色，由四段真实乐器单音分析得到C2/C3/C4/C6的幅度和相对谐波衰减；缺少的曲线字段会补为A/D/R曲率0.9/0.6/0.3和水平Pitch包络；
-- `tools/pianotone2.json`：保留的上一版安全归一化钢琴预设，可手动载入比较；
-- `tools/additive_piano_4anchor.json`：另一组可载入的加法合成预设；
+- `tools/presets/instrument_4anchor_relative_decay.json`：当前上电及上位机默认音色，由四段真实乐器单音分析得到C2/C3/C4/C6的幅度和相对谐波衰减；缺少的曲线字段会补为A/D/R曲率0.9/0.6/0.3和水平Pitch包络；
+- `tools/presets/pianotone2.json`：保留的上一版安全归一化钢琴预设，可手动载入比较；
+- `tools/presets/additive_piano_4anchor.json`：另一组可载入的加法合成预设；
 - `src/generated/additive_sine_quarter_512.mem`：512点四分之一正弦ROM，两路物理读通道共享同一内容；
 - `src/generated/additive_harmonic_amp.mem`：4 × 16默认幅度；
 - `src/generated/tone_amp_envelope_tables.mem`：Attack、Decay、Release打包后的3 × 256点幅度曲线；
 - `src/generated/pitch_envelope_ratio.mem`：256点Q4.12 Pitch频率倍率初值；
 - `src/generated/filter_envelope_4anchor.mem`：4 × 64点动态截止频率包络；
 - `src/generated/filter_alpha_256.mem`：80 Hz～12 kHz对数映射的一阶滤波系数表；
-- `tools/generate_additive_tables.py`：从JSON重新生成全部初始化表和定点时间参数。
+- `src/generated/midi_note_gain_q14.mem`：128音符Q2.14上电响度补偿曲线；
+- `tools/generators/generate_additive_tables.py`：从JSON重新生成全部初始化表和定点时间参数。
 
 修改默认JSON后重新生成：
 
 ```powershell
-python .\tools\generate_additive_tables.py
+cd tools
+python -m generators.generate_additive_tables
 ```
 
 ## 接线
@@ -272,13 +277,13 @@ python .\tools\generate_additive_tables.py
 
 | 资源 | 使用量 |
 | --- | ---: |
-| Logic | 17397 / 23040，76% |
-| Register | 7853 / 23040，35% |
-| CLS | 10416 / 11520，91% |
-| BSRAM | 32 / 56，58% |
-| DSP | 17.5 / 28，63% |
+| Logic | 17281 / 23040，75% |
+| Register | 8128 / 23280，35% |
+| CLS | 10531 / 11520，92% |
+| BSRAM | 34 / 56，61% |
+| DSP | 18.5 / 28，67% |
 
-50 MHz音频域实际Fmax为50.057 MHz，47.917 MHz USB域实际Fmax为60.521 MHz，TNS为0，无Setup/Hold违例。12复音、双路谐波计算、打包ADSR、四分之一正弦表和动态低通均已进入本次布局布线。生成文件为`impl/pnr/fpga_project.fs`。当前CLS达到91%，继续扩展25K时应先实板验证，不宜直接提高默认复音数。
+50 MHz音频域实际Fmax为50.093 MHz，47.917 MHz USB域实际Fmax为58.028 MHz，TNS为0，无Setup/Hold违例。12复音、双路谐波流水线、双缓冲响度表、打包ADSR、四分之一正弦表和动态低通均已进入本次布局布线。生成文件为`impl/pnr/fpga_project.fs`。当前CLS达到92%，继续扩展25K时应先实板验证，不宜直接提高默认复音数。
 
 ## 长时间演奏的数字自恢复
 

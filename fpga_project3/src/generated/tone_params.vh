@@ -4,8 +4,8 @@
 `define TONE_WAVETABLE_POINTS 2048
 `define TONE_SAMPLE_RATE_HZ 48828
 `define TONE_DEFAULT_PHASE_INC 32'd23012828
-`define TONE_AMP_ATTACK_SAMPLES 32'd1465
-`define TONE_AMP_ATTACK_PHASE_INC 32'h002CC3D9
+`define TONE_AMP_ATTACK_SAMPLES 32'd977
+`define TONE_AMP_ATTACK_PHASE_INC 32'h004325C5
 `define TONE_AMP_DECAY_SAMPLES 32'd24414
 `define TONE_AMP_DECAY_PHASE_INC 32'h0002AF3A
 `define TONE_AMP_SUSTAIN_Q16 16'd11796
@@ -32,8 +32,8 @@
 `define TONE_FILTER_ATTACK_CURVE_MEM "src/generated/tone_filter_attack_curve.mem"
 `define TONE_FILTER_DECAY_CURVE_MEM "src/generated/tone_filter_decay_curve.mem"
 `define TONE_FILTER_RELEASE_CURVE_MEM "src/generated/tone_filter_release_curve.mem"
-`define TONE_PITCH_ENVELOPE_SAMPLES 32'd12207
-`define TONE_PITCH_ENVELOPE_PHASE_INC 32'h00055E81
+`define TONE_PITCH_ENVELOPE_SAMPLES 32'd977
+`define TONE_PITCH_ENVELOPE_PHASE_INC 32'h004325C5
 `define TONE_PITCH_ENVELOPE_MEM "src/generated/pitch_envelope_ratio.mem"
 `define TONE_QUARTER_SINE_MEM "src/generated/additive_sine_quarter_512.mem"
 `define TONE_FILTER_ENVELOPE_MEM "src/generated/filter_envelope_4anchor.mem"

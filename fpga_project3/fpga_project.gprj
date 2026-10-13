@@ -10,6 +10,7 @@
         <File path="src/synth_uart_control.v" type="file.verilog" enable="1"/>
         <File path="src/midi_strum_controller.v" type="file.verilog" enable="1"/>
         <File path="src/midi_poly_synth.v" type="file.verilog" enable="1"/>
+        <File path="src/harmonic_render_pipeline.v" type="file.verilog" enable="1"/>
         <File path="src/midi_performance_control.v" type="file.verilog" enable="1"/>
         <File path="src/audio_effects.v" type="file.verilog" enable="1"/>
         <File path="src/usb_midi/rtl/rv32i.v" type="file.verilog" enable="1"/>

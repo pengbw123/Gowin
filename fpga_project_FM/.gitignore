@@ -1,0 +1,19 @@
+# Local instrument recordings and MIDI song libraries are deliberately kept
+# out of Git.  Only the small README files describing those folders belong in
+# the repository.
+tools/library/audiofiles/
+tools/audiofiles/
+tools/midi_library/**/*.mid
+tools/midi_library/**/*.midi
+tools/**/*.aif
+tools/**/*.aiff
+tools/**/*.wav
+tools/**/*.flac
+tools/**/*.mp3
+tools/**/*.ogg
+tools/presets/local/
+
+# Python-generated local state.
+__pycache__/
+*.py[cod]
+

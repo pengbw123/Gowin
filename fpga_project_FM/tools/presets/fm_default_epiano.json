@@ -1,0 +1,27 @@
+{
+  "format": "gowin-fm-patch-v1",
+  "name": "FPGA EPNO",
+  "algorithm": 5,
+  "feedback": 2,
+  "osc_sync": true,
+  "transpose": 24,
+  "lfo": {
+    "speed": 35,
+    "delay": 20,
+    "pitch_depth": 0,
+    "amp_depth": 0,
+    "sync": true,
+    "waveform": 4,
+    "pitch_sensitivity": 3
+  },
+  "pitch_eg_rates": [50, 50, 50, 50],
+  "pitch_eg_levels": [50, 50, 50, 50],
+  "operators": [
+    {"number": 6, "enabled": true, "mode": "ratio", "coarse": 3, "fine": 0, "detune": 7, "output_level": 68, "eg_rates": [95,45,30,65], "eg_levels": [99,72,55,0], "rate_scaling": 2, "velocity_sensitivity": 3, "amp_mod_sensitivity": 0, "breakpoint": 39, "left_depth": 0, "right_depth": 18, "left_curve": 0, "right_curve": 0},
+    {"number": 5, "enabled": true, "mode": "ratio", "coarse": 1, "fine": 0, "detune": 7, "output_level": 88, "eg_rates": [95,45,30,65], "eg_levels": [99,72,55,0], "rate_scaling": 2, "velocity_sensitivity": 3, "amp_mod_sensitivity": 0, "breakpoint": 39, "left_depth": 0, "right_depth": 18, "left_curve": 0, "right_curve": 0},
+    {"number": 4, "enabled": true, "mode": "ratio", "coarse": 3, "fine": 0, "detune": 7, "output_level": 68, "eg_rates": [95,45,30,65], "eg_levels": [99,72,55,0], "rate_scaling": 2, "velocity_sensitivity": 3, "amp_mod_sensitivity": 0, "breakpoint": 39, "left_depth": 0, "right_depth": 18, "left_curve": 0, "right_curve": 0},
+    {"number": 3, "enabled": true, "mode": "ratio", "coarse": 1, "fine": 0, "detune": 7, "output_level": 88, "eg_rates": [95,45,30,65], "eg_levels": [99,72,55,0], "rate_scaling": 2, "velocity_sensitivity": 3, "amp_mod_sensitivity": 0, "breakpoint": 39, "left_depth": 0, "right_depth": 18, "left_curve": 0, "right_curve": 0},
+    {"number": 2, "enabled": true, "mode": "ratio", "coarse": 2, "fine": 0, "detune": 7, "output_level": 68, "eg_rates": [95,45,30,65], "eg_levels": [99,72,55,0], "rate_scaling": 2, "velocity_sensitivity": 3, "amp_mod_sensitivity": 0, "breakpoint": 39, "left_depth": 0, "right_depth": 18, "left_curve": 0, "right_curve": 0},
+    {"number": 1, "enabled": true, "mode": "ratio", "coarse": 1, "fine": 0, "detune": 7, "output_level": 88, "eg_rates": [95,45,30,65], "eg_levels": [99,72,55,0], "rate_scaling": 2, "velocity_sensitivity": 3, "amp_mod_sensitivity": 0, "breakpoint": 39, "left_depth": 0, "right_depth": 18, "left_curve": 0, "right_curve": 0}
+  ]
+}

@@ -95,14 +95,18 @@ module fm_poly_synth #(
     reg [31:0] midi_phase_increment [0:127];
     reg [15:0] sine_quarter [0:511];
     reg [16:0] pitch_ratio_table [0:511];
-    reg [15:0] dx7_level_gain [0:1023];
+    reg [16:0] dx7_level_gain [0:1023];
     reg [7:0]  dx7_velocity_curve [0:63];
+    reg [31:0] dx7_lfo_phase_increment [0:127];
+    reg signed [8:0] dx7_lfo_sine [0:255];
     initial begin
         $readmemh("src/generated/midi_phase_inc.mem", midi_phase_increment);
         $readmemh("src/generated/additive_sine_quarter_512.mem", sine_quarter);
         $readmemb("src/generated/pitch_ratio_q16.mem", pitch_ratio_table);
-        $readmemh("src/generated/dx7_level_gain_q16.mem", dx7_level_gain);
+        $readmemb("src/generated/dx7_level_gain_q16.mem", dx7_level_gain);
         $readmemh("src/generated/dx7_velocity_curve.mem", dx7_velocity_curve);
+        $readmemh("src/generated/dx7_lfo_phase_inc.mem", dx7_lfo_phase_increment);
+        $readmemb("src/generated/dx7_lfo_sine_q8.mem", dx7_lfo_sine);
     end
 
     // Patch storage. Frequency is Q16.16 ratio in ratio mode and a direct
@@ -155,7 +159,10 @@ module fm_poly_synth #(
     reg [16:0] voice_pitch_ratio [0:VOICE_COUNT-1];
     reg [16:0] voice_combined_pitch_ratio [0:VOICE_COUNT-1];
     reg [1:0]  voice_pitch_stage [0:VOICE_COUNT-1];
-    reg [31:0] voice_feedback [0:VOICE_COUNT-1];
+    // DX7 feedback averages the two preceding operator samples.  Keeping only
+    // one sample changed the feedback spectrum most strongly at settings 5..7.
+    reg signed [31:0] voice_feedback_old [0:VOICE_COUNT-1];
+    reg signed [31:0] voice_feedback_new [0:VOICE_COUNT-1];
     reg signed [31:0] voice_bus_one [0:VOICE_COUNT-1];
     reg signed [31:0] voice_bus_two [0:VOICE_COUNT-1];
     reg signed [31:0] voice_output [0:VOICE_COUNT-1];
@@ -283,22 +290,43 @@ module fm_poly_synth #(
             3'd1: lfo_value = 9'sd255 - $signed({1'b0, lfo_ramp}) * 2;
             3'd2: lfo_value = $signed({1'b0, lfo_ramp}) * 2 - 9'sd255;
             3'd3: lfo_value = lfo_phase[31] ? -9'sd255 : 9'sd255;
-            3'd4: lfo_value = lfo_triangle; // low-cost sine approximation
+            3'd4: lfo_value = dx7_lfo_sine[lfo_phase[31:24]];
             default: lfo_value = $signed(lfo_sample_hold) <<< 1;
         endcase
     end
     wire [6:0] selected_lfo_speed = (vibrato_rate != 7'd64)
         ? vibrato_rate : fm_lfo_speed;
-    wire [31:0] lfo_phase_increment = 32'd180000 +
-        ({25'd0, selected_lfo_speed} << 13) +
-        ({25'd0, selected_lfo_speed} << 10);
-    wire [7:0] combined_lfo_pitch_depth =
-        ({1'b0, fm_lfo_pitch_depth} + {1'b0, vibrato_depth} > 8'd127)
-        ? 8'd127 : {1'b0, fm_lfo_pitch_depth} + {1'b0, vibrato_depth};
-    wire signed [18:0] lfo_pitch_product = lfo_value *
-        $signed({1'b0, combined_lfo_pitch_depth}) *
-        $signed({1'b0, fm_pitch_mod_sensitivity} + 1'b1);
-    wire signed [9:0] lfo_pitch_index = lfo_pitch_product >>> 11;
+    wire [31:0] lfo_phase_increment =
+        dx7_lfo_phase_increment[selected_lfo_speed];
+    function [7:0] pitch_mod_sensitivity_scale;
+        input [2:0] sensitivity;
+        begin
+            case (sensitivity)
+                3'd0: pitch_mod_sensitivity_scale = 8'd0;
+                3'd1: pitch_mod_sensitivity_scale = 8'd10;
+                3'd2: pitch_mod_sensitivity_scale = 8'd20;
+                3'd3: pitch_mod_sensitivity_scale = 8'd33;
+                3'd4: pitch_mod_sensitivity_scale = 8'd55;
+                3'd5: pitch_mod_sensitivity_scale = 8'd92;
+                3'd6: pitch_mod_sensitivity_scale = 8'd153;
+                default: pitch_mod_sensitivity_scale = 8'd255;
+            endcase
+        end
+    endfunction
+    wire [7:0] patch_pitch_sensitivity =
+        pitch_mod_sensitivity_scale(fm_pitch_mod_sensitivity);
+    wire signed [26:0] lfo_patch_pitch_product = lfo_value *
+        $signed({1'b0, fm_lfo_pitch_depth}) *
+        $signed({1'b0, patch_pitch_sensitivity});
+    // The physical MOD strip remains useful even when the loaded DX7 voice
+    // has PMS=0.  Its fixed scale is close to DX7 sensitivity setting 5.
+    wire signed [25:0] lfo_manual_pitch_product = lfo_value *
+        $signed({1'b0, vibrato_depth}) * 8'sd92;
+    wire signed [27:0] lfo_pitch_product =
+        $signed({lfo_patch_pitch_product[26], lfo_patch_pitch_product}) +
+        $signed({{2{lfo_manual_pitch_product[25]}}, lfo_manual_pitch_product});
+    wire signed [11:0] lfo_pitch_index_wide = lfo_pitch_product >>> 16;
+    wire signed [9:0] lfo_pitch_index = lfo_pitch_index_wide[9:0];
     wire signed [10:0] pitch_index_combined =
         $signed({2'b00, pitch_bend[13:5]}) + lfo_pitch_index;
     wire [8:0] pitch_table_address = (pitch_index_combined < 0) ? 9'd0 :
@@ -313,8 +341,13 @@ module fm_poly_synth #(
     wire signed [31:0] issue_bus_value =
         (issue_input_bus == 2'd1) ? voice_bus_one[scheduler_voice] :
         (issue_input_bus == 2'd2) ? voice_bus_two[scheduler_voice] : 32'sd0;
+    wire signed [32:0] issue_feedback_sum =
+        $signed(voice_feedback_old[scheduler_voice]) +
+        $signed(voice_feedback_new[scheduler_voice]);
+    wire signed [32:0] issue_feedback_shifted =
+        issue_feedback_sum >>> (4'd9 - fm_feedback);
     wire signed [31:0] issue_feedback_value = (fm_feedback == 0)
-        ? 32'sd0 : ($signed(voice_feedback[scheduler_voice]) >>> (4'd8 - fm_feedback));
+        ? 32'sd0 : issue_feedback_shifted[31:0];
     wire signed [32:0] issue_modulation_sum =
         $signed({issue_bus_value[31], issue_bus_value}) +
         (issue_flags[6] ? $signed({issue_feedback_value[31], issue_feedback_value}) : 33'sd0);
@@ -327,9 +360,21 @@ module fm_poly_synth #(
     wire [1:0] render_env_stage_stored = operator_state_read_data[1:0];
     wire [1:0] render_env_stage = voice_gate[operator_read_voice]
         ? render_env_stage_stored : 2'd3;
+    // DX7 fixed-frequency operators ignore the voice pitch EG and patch LFO.
+    // Applying those ratios made percussion/noise/effect voices wander in
+    // pitch and was one of the main reasons a few cartridges sounded nothing
+    // like their Dexed counterpart.  Ratio-mode operators retain the complete
+    // pitch path. (Pitch bend for fixed operators is a documented remaining
+    // approximation; keeping their programmed frequency is much closer than
+    // applying the whole modulation path.)
     wire [48:0] issue_global_pitch_product = render_increment *
         voice_combined_pitch_ratio[operator_read_voice];
-    wire [32:0] issue_frequency_wide = issue_global_pitch_product[48:16];
+    // Put the fixed/ratio selection after the multiplier.  Besides matching
+    // the intended behavior, this keeps a mux out of the DSP input path and
+    // preserves the small but important margin over the 50 MHz constraint.
+    wire [32:0] issue_frequency_wide =
+        patch_op_fixed[operator_read_operator]
+        ? {1'b0, render_increment} : issue_global_pitch_product[48:16];
     wire [31:0] issue_frequency = issue_frequency_wide[32]
         ? 32'hffffffff : issue_frequency_wide[31:0];
     wire [31:0] issue_phase_modulated = render_phase +
@@ -381,10 +426,10 @@ module fm_poly_synth #(
         ? 16'd0 :
         (|issue_amp_lfo_reduction_wide[17:16]) ? 16'hffff :
         issue_amp_lfo_reduction_wide[15:0];
-    wire [15:0] issue_level_gain_raw = dx7_level_gain[render_env_current[23:14]];
-    wire [15:0] issue_env_for_audio =
+    wire [16:0] issue_level_gain_raw = dx7_level_gain[render_env_current[23:14]];
+    wire [16:0] issue_env_for_audio =
         (issue_amp_lfo_reduction >= issue_level_gain_raw)
-        ? 16'd0 : issue_level_gain_raw - issue_amp_lfo_reduction;
+        ? 17'd0 : issue_level_gain_raw - issue_amp_lfo_reduction;
 
     // Envelope/frequency pre-pipeline.  The first implementation performed
     // coefficient selection, multiplication, add, saturation and state-RAM
@@ -396,7 +441,7 @@ module fm_poly_synth #(
     reg [7:0] e0_flags;
     reg [8:0] e0_sine_address;
     reg       e0_sine_negative;
-    reg [15:0] e0_envelope_for_audio;
+    reg [16:0] e0_envelope_for_audio;
     reg       e0_enabled;
     reg [31:0] e0_phase;
     reg [31:0] e0_increment;
@@ -435,7 +480,7 @@ module fm_poly_synth #(
     reg [7:0] p0_flags;
     reg [8:0] p0_sine_address;
     reg       p0_sine_negative;
-    reg [15:0] p0_envelope;
+    reg [16:0] p0_envelope;
     reg        p0_enabled;
 
     reg        p1_valid;
@@ -443,7 +488,7 @@ module fm_poly_synth #(
     reg [2:0] p1_operator;
     reg [7:0] p1_flags;
     reg signed [16:0] p1_sine;
-    reg [15:0] p1_envelope;
+    reg [16:0] p1_envelope;
     reg        p1_enabled;
 
     reg        p2_valid;
@@ -451,24 +496,25 @@ module fm_poly_synth #(
     reg [2:0] p2_operator;
     reg [7:0] p2_flags;
     reg signed [16:0] p2_sine;
-    reg [15:0] p2_gain;
+    reg [16:0] p2_gain;
     reg        p2_enabled;
 
     reg        p3_valid;
     reg [VOICE_BITS-1:0] p3_voice;
     reg [2:0] p3_operator;
     reg [7:0] p3_flags;
-    reg signed [32:0] p3_sample_product;
-    reg [15:0] p3_envelope;
+    reg signed [34:0] p3_sample_product;
+    reg [16:0] p3_envelope;
     reg        p3_enabled;
 
-    wire signed [32:0] p3_operator_sample_wide = p3_sample_product >>> 16;
+    wire signed [34:0] p3_operator_sample_wide = p3_sample_product >>> 16;
     wire signed [31:0] p3_operator_sample = p3_enabled
         ? p3_operator_sample_wide[31:0] : 32'sd0;
-    // A full-scale DX7 operator reaches roughly +/-2 phase cycles.  The old
-    // <<15 scale only reached half a cycle and erased much of each patch's
-    // characteristic FM spectrum.
-    wire signed [31:0] p3_modulation_value = p3_operator_sample <<< 17;
+    // In Dexed, internal level 3840 produces gain 2.0 in a phase domain where
+    // one cycle is 2^24.  Our sine is Q15 and phase is Q0.32, hence <<18.
+    // The previous <<17 mapping halved every modulation index and audibly
+    // removed upper sidebands (the characteristic "dark FPGA" error).
+    wire signed [31:0] p3_modulation_value = p3_operator_sample <<< 18;
 
     wire pipeline_busy = e0_valid | p0_valid | p1_valid | p2_valid | p3_valid |
                          operator_read_pending | operator_state_write_valid;
@@ -654,7 +700,8 @@ module fm_poly_synth #(
                 voice_pitch_ratio[init_index] <= 17'h10000;
                 voice_combined_pitch_ratio[init_index] <= 17'h10000;
                 voice_pitch_stage[init_index] <= 2'd0;
-                voice_feedback[init_index] <= 32'd0;
+                voice_feedback_old[init_index] <= 32'sd0;
+                voice_feedback_new[init_index] <= 32'sd0;
                 voice_bus_one[init_index] <= 32'sd0;
                 voice_bus_two[init_index] <= 32'sd0;
                 voice_output[init_index] <= 32'sd0;
@@ -772,8 +819,10 @@ module fm_poly_synth #(
                     default: voice_output[p3_voice] <= voice_output[p3_voice] +
                                                               p3_operator_sample;
                 endcase
-                if (p3_flags[7])
-                    voice_feedback[p3_voice] <= p3_modulation_value;
+                if (p3_flags[7]) begin
+                    voice_feedback_old[p3_voice] <= voice_feedback_new[p3_voice];
+                    voice_feedback_new[p3_voice] <= p3_modulation_value;
+                end
             end
             p0_valid <= e0_valid;
             if (e0_valid) begin
@@ -899,7 +948,8 @@ module fm_poly_synth #(
                         voice_pitch_ratio[event_target_voice] <= patch_pitch_ratio[3];
                         voice_combined_pitch_ratio[event_target_voice] <= 17'h10000;
                         voice_pitch_stage[event_target_voice] <= 2'd0;
-                        voice_feedback[event_target_voice] <= 32'd0;
+                        voice_feedback_old[event_target_voice] <= 32'sd0;
+                        voice_feedback_new[event_target_voice] <= 32'sd0;
                     end
                     patch_note_gain_read_address <= {event_init_operator, event_note};
                     engine_state <= ENGINE_EVENT_GAIN_WAIT;

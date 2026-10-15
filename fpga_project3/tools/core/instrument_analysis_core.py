@@ -287,6 +287,8 @@ def analyse_audio(
     selected = source[first:last].copy()
     if selected.size < 32:
         raise ValueError("selected audio is too short")
+    selected_sample_count = int(selected.size)
+    selected_duration_s = selected_sample_count / float(sample_rate_hz)
     selected -= float(np.mean(selected))
     if np.max(np.abs(selected)) < 1.0e-9:
         raise ValueError("selected audio is silent")
@@ -303,9 +305,19 @@ def analyse_audio(
         nperseg=n_fft,
         noverlap=n_fft - hop,
         nfft=n_fft,
-        boundary=None,
-        padded=False,
+        # Centre an FFT frame on the first sample and zero-pad both edges.
+        # With boundary=None the first/last selectable time was half an FFT
+        # window away from the visible audio edges (170.7 ms for 16384 points
+        # at 48 kHz), which made the GUI cursor appear trapped in the middle.
+        boundary="zeros",
+        padded=True,
     )
+    # scipy may add one final hop beyond the real selection when its length is
+    # not an exact hop multiple.  Keep edge-centred frames, but do not expose a
+    # cursor position after the selected audio has ended.
+    valid_frames = relative_times <= selected_duration_s + 1.0e-12
+    relative_times = relative_times[valid_frames]
+    zxx = zxx[:, valid_frames]
     magnitude = np.abs(zxx)
     # scipy.signal.stft with a Hann window reports a sinusoid close to half its
     # peak amplitude.  Doubling gives a useful approximately dBFS scale.

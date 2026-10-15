@@ -30,6 +30,20 @@ Thumbs.db
 *.tmp
 *~
 
+# Large local music/sample libraries are test inputs, not source artifacts
+*.mid
+*.midi
+*.wav
+*.wave
+*.aif
+*.aiff
+*.flac
+*.mp3
+*.ogg
+*.sf2
+*.sfz
+*.syx
+
 # Local diagnostic and obsolete copied files are not part of the release
 **/diagnostics/
 **/build_cpu_diag.tcl

@@ -41,6 +41,27 @@ class InstrumentAnalysisCoreTest(unittest.TestCase):
         self.assertIsNotNone(result.harmonic_fits[0].tau_ms)
         self.assertAlmostEqual(result.harmonic_fits[0].tau_ms, 550.0, delta=140.0)
 
+    def test_stft_frames_cover_selection_edges(self) -> None:
+        start_s = 0.137
+        end_s = 1.071
+        hop = 1024
+        result = analyse_audio(
+            self.audio,
+            self.sample_rate,
+            selection_start_s=start_s,
+            selection_end_s=end_s,
+            expected_midi=69.0,
+            n_fft=16384,
+            hop_length=hop,
+            max_harmonics=4,
+        )
+        # The selectable time should begin exactly at the selection boundary
+        # and finish no farther than one hop before its end, independently of
+        # the much larger FFT window length.
+        self.assertAlmostEqual(result.times_s[0], start_s, places=9)
+        self.assertGreaterEqual(result.times_s[-1], end_s - hop / self.sample_rate)
+        self.assertLessEqual(result.times_s[-1], end_s + 1.0e-9)
+
 
 if __name__ == "__main__":
     unittest.main()

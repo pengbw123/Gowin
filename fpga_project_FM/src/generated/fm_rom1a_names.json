@@ -1,0 +1,130 @@
+[
+  {
+    "index": 0,
+    "name": "BRASS   1"
+  },
+  {
+    "index": 1,
+    "name": "BRASS   2"
+  },
+  {
+    "index": 2,
+    "name": "BRASS   3"
+  },
+  {
+    "index": 3,
+    "name": "STRINGS 1"
+  },
+  {
+    "index": 4,
+    "name": "STRINGS 2"
+  },
+  {
+    "index": 5,
+    "name": "STRINGS 3"
+  },
+  {
+    "index": 6,
+    "name": "ORCHESTRA"
+  },
+  {
+    "index": 7,
+    "name": "PIANO   1"
+  },
+  {
+    "index": 8,
+    "name": "PIANO   2"
+  },
+  {
+    "index": 9,
+    "name": "PIANO   3"
+  },
+  {
+    "index": 10,
+    "name": "E.PIANO 1"
+  },
+  {
+    "index": 11,
+    "name": "GUITAR  1"
+  },
+  {
+    "index": 12,
+    "name": "GUITAR  2"
+  },
+  {
+    "index": 13,
+    "name": "SYN-LEAD 1"
+  },
+  {
+    "index": 14,
+    "name": "BASS    1"
+  },
+  {
+    "index": 15,
+    "name": "BASS    2"
+  },
+  {
+    "index": 16,
+    "name": "E.ORGAN 1"
+  },
+  {
+    "index": 17,
+    "name": "PIPES   1"
+  },
+  {
+    "index": 18,
+    "name": "HARPSICH 1"
+  },
+  {
+    "index": 19,
+    "name": "CLAV    1"
+  },
+  {
+    "index": 20,
+    "name": "VIBE    1"
+  },
+  {
+    "index": 21,
+    "name": "MARIMBA"
+  },
+  {
+    "index": 22,
+    "name": "KOTO"
+  },
+  {
+    "index": 23,
+    "name": "FLUTE   1"
+  },
+  {
+    "index": 24,
+    "name": "ORCH-CHIME"
+  },
+  {
+    "index": 25,
+    "name": "TUB BELLS"
+  },
+  {
+    "index": 26,
+    "name": "STEEL DRUM"
+  },
+  {
+    "index": 27,
+    "name": "TIMPANI"
+  },
+  {
+    "index": 28,
+    "name": "REFS WHISL"
+  },
+  {
+    "index": 29,
+    "name": "VOICE   1"
+  },
+  {
+    "index": 30,
+    "name": "TRAIN"
+  },
+  {
+    "index": 31,
+    "name": "TAKE OFF"
+  }
+]

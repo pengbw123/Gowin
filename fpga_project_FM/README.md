@@ -8,11 +8,12 @@
 25键USB-MIDI键盘 / UART上位机
   -> USB1.1 PHY/SIE + RV32I枚举，或UART定长协议
   -> USB/UART演奏事件仲裁
-  -> 16声部管理、力度、CC64延音、Pitch Bend、LFO
+  -> 16声部管理、力度、CC64延音、Pitch Bend、LFO、32音色预设
   -> 6算子调度器（OP6 -> OP1）
   -> 状态BSRAM -> DX7对数EG -> 增益ROM -> 正弦ROM -> 算法路由/反馈
   -> 16声部混音 -> Chorus -> Reverb
   -> I2S -> MAX98357 -> 扬声器
+  -> 160x80 SPI LCD波形/声部数/预设状态反馈
 ```
 
 每个声部包含6个正弦算子，每个算子都有Ratio/Fixed频率、输出电平、四段Rate/Level包络、力度灵敏度、幅度LFO与键位缩放；全局还有32种连接算法、反馈、Pitch EG、LFO和移调。
@@ -25,7 +26,8 @@
 - 调度器连续处理16个声部的同一算子，再进入下一算子；
 - 四级共享流水线依次完成状态读取/相位、对数Level查增益、正弦乘法、输出路由；
 - 相邻声部天然隔开依赖算子的读写延迟，一个物理计算通道即可服务96个逻辑算子；
-- 6×128键位缩放在PC端预编译为带符号Level偏移，FPGA在Note On时叠加力度；每个采样只做有限步长EG和共享ROM查表。
+- 键位缩放改为Note On多拍计算，不再为每个音色保存6×128大表；32套预设只保存紧凑参数；
+- Pitch EG使用21位Q5.16比例覆盖约±4八度；LFO延迟、淡入和AMS都在寄存器边界处分拍，避免拖慢音频主流水线。
 
 `VOICE_COUNT`是模块参数，后续Mega60K可提高声部数；但增加复音前必须重新检查每采样周期的调度预算、DSP、BSRAM和Fmax。
 
@@ -44,7 +46,7 @@
 - 六个独立四段Rate/Level EG、Rate Scaling、力度、AMS与左右键位缩放；
 - C3/C4/C5上板试听。
 
-“发送完整音色”会先发送All Notes Off，把DX7参数编译成FPGA固定点参数和键位增益表，最后Commit。约800个12字节包在115200波特率下约需1秒。发送期间不要让串口助手或另一上位机占用同一COM口。
+“发送完整音色”会先发送All Notes Off，把DX7参数编译成紧凑FPGA固定点参数，最后Commit。取消768项键位表后，一套音色只需约40个包，发送明显更快。发送期间不要让串口助手或另一上位机占用同一COM口。
 
 默认示例位于`tools/presets/fm_default_epiano.json`。
 
@@ -60,6 +62,7 @@
 | LATCH旋钮 / CC22 | Portamento参数（FM核当前仅保留接口） |
 | SWING旋钮 / CC24 | Reverb量 |
 | RATE旋钮 / CC26 | 颤音速度 |
+| TRANSPOSE旋钮 / CC27 | 数值0～31选择ROM1A预设，32～127忽略 |
 | CC64 | 延音踏板 |
 
 旧吉他扫弦模块没有接入这个FM分支：它会额外占用约千级LUT，并曾成为50 MHz关键路径。扫弦算法仍完整保留在原加法合成工程，等Mega60K资源和时序更宽裕时再移植更稳妥。
@@ -84,6 +87,9 @@ MAX98357接Dock J3：
 | S2复位 | H10 |
 | UART RX/TX | B3 / C3 |
 | USB Host D+ / D- | L6 / K6 |
+| LCD CS / MOSI / DC / SCK / RESET | F5 / G7 / H8 / H5 / J5 |
+
+SPI屏使用Sipeed一PMOD 0.96英寸ST7735 160×80模块：显示青色实时波形、绿色预设编号条、红色当前复音数条和黄色算法状态。屏幕由3.3 V供电，暂不使用TP/SDA/SCL触摸相关引脚。
 
 USB-A Dock连接MIDI键盘；板载USB-C用于下载、JTAG和BL616串口。MAX98357优先从J3的5 V供电并与FPGA共地，不从普通GPIO供电。
 
@@ -99,7 +105,7 @@ python -m unittest discover -s tools/tests -p 'test_*.py' -v
 
 比特流输出为`impl/pnr/fpga_project.fs`。
 
-2026-10-14当前完整布局布线结果：50 MHz音频域实际Fmax 51.012 MHz，47.917 MHz USB域实际Fmax 89.829 MHz，Setup/Hold TNS均为0；逻辑14014/23040（61%）、寄存器7182/23280（31%）、BSRAM 33/56（59%）、DSP 14.5/28（52%）。这组数据包括16复音FM、USB软核、Chorus、Reverb和I2S。
+2026-10-15加入32套ROM1A预设、完整Pitch EG范围、LFO两段Delay/Sync、对数域AMS和SPI屏后，完整工程通过布局布线：50 MHz域实际Fmax 55.871 MHz，47.917 MHz USB域实际Fmax 90.932 MHz；逻辑15300/23040（67%）、寄存器8624/23280（38%）、CLS 10608/11520（93%）、BSRAM 46/56（83%）、DSP 20.5/28（74%）。时序通过且能生成比特流，但CLS已经较拥挤，后续新增大模块前必须重新综合。
 
 ## 主要源码
 
@@ -109,7 +115,9 @@ python -m unittest discover -s tools/tests -p 'test_*.py' -v
 | `src/fm_uart_control.v` | FM参数、UART MIDI和扫弦配置协议 |
 | `src/top.v` | USB、UART、FM核、效果器与I2S集成 |
 | `src/audio_effects.v` | Chorus与Reverb |
+| `src/fm_status_lcd.v` | 160×80 ST7735轻量图像反馈 |
 | `tools/core/fm_patch.py` | SysEx解析、DX7参数编译与串口打包 |
+| `tools/generators/generate_fm_preset_bank.py` | 从32音色SYX生成片上紧凑预设 |
 | `tools/apps/fm_editor.py` | FM图形编辑器 |
 
 ## 当前边界与后续升级
@@ -118,5 +126,7 @@ python -m unittest discover -s tools/tests -p 'test_*.py' -v
 - Chorus与Reverb保留，旧Delay未接入最终音频链；
 - 吉他扫弦暂不接入FM实时链，优先保证16复音FM稳定性；
 - Portamento接口保留，当前FM核尚未恢复逐声部滑音状态；
-- 上电默认音色是内置电钢琴风格参数，UART导入音色只在本次上电期间保留；
+- 数字音频回传电脑本版暂未加入：当前CLS已接近上限，先用I2S数字输出与喇叭试听保证主链稳定；Mega60K版可增加USB Audio或UART降采样抓取；
+- 上电自动装载ROM1A的0号`BRASS 1`；CC27的0～31选择整库32音色，UART临时导入仍只在本次上电期间保留；
+- 剩余DX7差异逐项记录在`docs/DX7_COMPATIBILITY.md`；
 - Mega60K优先增加声部数、参数双缓冲和反馈精度，再考虑动态滤波或更多效果器并行。

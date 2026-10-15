@@ -15,7 +15,9 @@ module midi_performance_control (
     output reg  [6:0]  chorus_mix,
     output reg  [6:0]  delay_mix,
     output reg  [6:0]  delay_time,
-    output reg  [6:0]  reverb_mix
+    output reg  [6:0]  reverb_mix,
+    output reg         preset_select_valid,
+    output reg  [4:0]  preset_select
 );
 
     wire [7:0] status = midi_event_data[23:16];
@@ -32,7 +34,11 @@ module midi_performance_control (
             delay_mix       <= 7'd0;
             delay_time      <= 7'd64;
             reverb_mix      <= 7'd0;
-        end else if (midi_event_valid) begin
+            preset_select_valid <= 1'b0;
+            preset_select <= 5'd0;
+        end else begin
+            preset_select_valid <= 1'b0;
+            if (midi_event_valid) begin
             // Standard 14-bit MIDI pitch bend: data1 is LSB, data2 is MSB.
             if ((status & 8'hf0) == 8'he0) begin
                 pitch_bend <= {data2, data1};
@@ -49,6 +55,13 @@ module midi_performance_control (
                     7'd24: reverb_mix      <= data2; // SWING knob
                     7'd25: delay_time      <= data2; // TEMPO knob
                     7'd26: vibrato_rate    <= data2; // RATE knob
+                    // TRANSPOSE knob: direct values 0..31 select ROM1A's
+                    // 32 power-on voices. Values 32..127 are ignored so the
+                    // encoder cannot unexpectedly wrap to another patch.
+                    7'd27: if (data2 <= 7'd31) begin
+                        preset_select <= data2[4:0];
+                        preset_select_valid <= 1'b1;
+                    end
 
                     // Also accept General-MIDI effect-send controllers so a
                     // different class-compliant keyboard can control them.
@@ -57,6 +70,7 @@ module midi_performance_control (
                     default: begin end
                 endcase
             end
+        end
         end
     end
 

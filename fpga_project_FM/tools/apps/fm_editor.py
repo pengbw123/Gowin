@@ -117,6 +117,9 @@ class FmEditor(tk.Tk):
         self.global_vars["osc_sync"] = tk.BooleanVar()
         ttk.Checkbutton(frame, text="按键相位同步", variable=self.global_vars["osc_sync"]).grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        self.global_vars["lfo_sync"] = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frame, text="LFO按键同步", variable=self.global_vars["lfo_sync"]).grid(
+            row=2, column=5, columnspan=2, sticky="w", pady=(5, 0))
         self.global_vars["lfo_waveform"] = tk.IntVar()
         ttk.Label(frame, text="LFO波形").grid(row=2, column=2, sticky="e")
         ttk.Combobox(frame, width=12, state="readonly", values=LFO_NAMES,
@@ -209,7 +212,7 @@ class FmEditor(tk.Tk):
                 "amp_depth": self.global_vars["lfo_amp_depth"].get(),
                 "waveform": LFO_NAMES.index(lfo_name) if lfo_name in LFO_NAMES else 4,
                 "pitch_sensitivity": self.global_vars["pitch_sensitivity"].get(),
-                "sync": True,
+                "sync": self.global_vars["lfo_sync"].get(),
             },
             "pitch_eg_rates": [var.get() for var in self.pitch_rate_vars],
             "pitch_eg_levels": [var.get() for var in self.pitch_level_vars],
@@ -232,6 +235,7 @@ class FmEditor(tk.Tk):
         for key in ("speed", "delay", "pitch_depth", "amp_depth"):
             self.global_vars[f"lfo_{key}"].set(values["lfo"][key])
         self.global_vars["pitch_sensitivity"].set(values["lfo"]["pitch_sensitivity"])
+        self.global_vars["lfo_sync"].set(values["lfo"].get("sync", True))
         self.lfo_box.set(LFO_NAMES[min(5, values["lfo"]["waveform"])])
         for variable, value in zip(self.pitch_rate_vars, values["pitch_eg_rates"]):
             variable.set(value)

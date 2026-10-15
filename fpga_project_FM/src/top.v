@@ -10,7 +10,12 @@ module top (
     inout  wire usb_host_dn,
     output wire i2s_bclk,
     output wire i2s_lrclk,
-    output wire i2s_din
+    output wire i2s_din,
+    output wire lcd_resetn,
+    output wire lcd_clk,
+    output wire lcd_cs,
+    output wire lcd_dc,
+    output wire lcd_data
 );
     wire clk_usb_48m;
     wire clk_usb_bram_96m;
@@ -112,6 +117,8 @@ module top (
     wire [13:0] pitch_bend;
     wire [6:0] vibrato_depth, vibrato_rate, portamento_time;
     wire [6:0] chorus_mix, delay_mix, delay_time, reverb_mix;
+    wire preset_select_valid;
+    wire [4:0] preset_select;
     midi_performance_control u_midi_performance_control (
         .clk(clk), .reset_n(audio_reset_n),
         .midi_event_data(midi_event_latched),
@@ -119,7 +126,9 @@ module top (
         .pitch_bend(pitch_bend), .vibrato_depth(vibrato_depth),
         .vibrato_rate(vibrato_rate), .portamento_time(portamento_time),
         .chorus_mix(chorus_mix), .delay_mix(delay_mix),
-        .delay_time(delay_time), .reverb_mix(reverb_mix)
+        .delay_time(delay_time), .reverb_mix(reverb_mix),
+        .preset_select_valid(preset_select_valid),
+        .preset_select(preset_select)
     );
 
     wire strum_mode;
@@ -136,6 +145,7 @@ module top (
     wire [6:0] fm_transpose;
     wire [2:0] fm_lfo_waveform;
     wire [6:0] fm_lfo_speed, fm_lfo_delay;
+    wire fm_lfo_sync;
     wire [6:0] fm_lfo_pitch_depth, fm_lfo_amp_depth;
     wire [2:0] fm_pitch_mod_sensitivity;
     wire fm_operator_write_valid;
@@ -156,16 +166,19 @@ module top (
     wire fm_pitch_envelope_write_valid;
     wire [1:0] fm_pitch_envelope_stage;
     wire [15:0] fm_pitch_envelope_coefficient;
-    wire [16:0] fm_pitch_envelope_ratio;
+    wire [20:0] fm_pitch_envelope_ratio;
     wire fm_algorithm_flags_write_valid;
     wire [47:0] fm_algorithm_flags;
     wire fm_note_gain_write_valid;
     wire [9:0] fm_note_gain_address;
     wire [15:0] fm_note_gain_value;
     wire fm_patch_commit;
+    wire [4:0] current_preset;
 
     fm_uart_control u_fm_uart_control (
         .clk(clk), .reset_n(audio_reset_n), .uart_rx_pin(uart_rx_pin),
+        .preset_select_valid(preset_select_valid),
+        .preset_select(preset_select),
         .midi_event_data(uart_midi_event_data),
         .midi_event_valid(uart_midi_event_valid),
         .midi_event_brightness(uart_midi_event_brightness),
@@ -179,6 +192,7 @@ module top (
         .fm_osc_sync(fm_osc_sync), .fm_transpose(fm_transpose),
         .fm_lfo_waveform(fm_lfo_waveform), .fm_lfo_speed(fm_lfo_speed),
         .fm_lfo_delay(fm_lfo_delay),
+        .fm_lfo_sync(fm_lfo_sync),
         .fm_lfo_pitch_depth(fm_lfo_pitch_depth),
         .fm_lfo_amp_depth(fm_lfo_amp_depth),
         .fm_pitch_mod_sensitivity(fm_pitch_mod_sensitivity),
@@ -213,7 +227,8 @@ module top (
         .fm_note_gain_address(fm_note_gain_address),
         .fm_note_gain_value(fm_note_gain_value),
         .fm_patch_commit(fm_patch_commit),
-        .packet_received(uart_packet_received), .packet_error(uart_packet_error)
+        .packet_received(uart_packet_received), .packet_error(uart_packet_error),
+        .current_preset(current_preset)
     );
 
     wire sample_tick;
@@ -241,7 +256,8 @@ module top (
         .fm_algorithm(fm_algorithm), .fm_feedback(fm_feedback),
         .fm_osc_sync(fm_osc_sync), .fm_transpose(fm_transpose),
         .fm_lfo_waveform(fm_lfo_waveform), .fm_lfo_speed(fm_lfo_speed),
-        .fm_lfo_delay(fm_lfo_delay), .fm_lfo_pitch_depth(fm_lfo_pitch_depth),
+        .fm_lfo_delay(fm_lfo_delay), .fm_lfo_sync(fm_lfo_sync),
+        .fm_lfo_pitch_depth(fm_lfo_pitch_depth),
         .fm_lfo_amp_depth(fm_lfo_amp_depth),
         .fm_pitch_mod_sensitivity(fm_pitch_mod_sensitivity),
         .fm_operator_write_valid(fm_operator_write_valid),
@@ -291,6 +307,15 @@ module top (
         .sample_left(effected_sample), .sample_right(effected_sample),
         .sample_tick(sample_tick), .i2s_bclk(i2s_bclk),
         .i2s_lrclk(i2s_lrclk), .i2s_din(i2s_din)
+    );
+
+    fm_status_lcd u_fm_status_lcd (
+        .clk(clk), .reset_n(audio_reset_n), .sample_tick(sample_tick),
+        .audio_sample(effected_sample),
+        .active_voice_count(active_voice_count),
+        .preset_index(current_preset), .algorithm(fm_algorithm),
+        .lcd_resetn(lcd_resetn), .lcd_clk(lcd_clk), .lcd_cs(lcd_cs),
+        .lcd_dc(lcd_dc), .lcd_data(lcd_data)
     );
 
     wire unused_fm_global_write_valid = fm_global_write_valid;

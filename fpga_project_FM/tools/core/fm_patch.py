@@ -29,6 +29,34 @@ CMD_FM_COMMIT = 0x66
 CMD_FM_ALGORITHM_FLAGS = 0x67
 CMD_FM_NOTE_GAIN = 0x68
 
+# Yamaha's pitch-EG level map is intentionally not linear.  One table step is
+# 1/32 octave (0.375 semitone), so the original 0..99 control spans almost
+# exactly four octaves in either direction instead of the former safe +/-12
+# semitone approximation.
+DX7_PITCH_LEVEL = (
+    -128, -116, -104, -95, -85, -76, -68, -61, -56, -52,
+    -49, -46, -43, -41, -39, -37, -35, -33, -32, -31,
+    -30, -29, -28, -27, -26, -25, -24, -23, -22, -21,
+    -20, -19, -18, -17, -16, -15, -14, -13, -12, -11,
+    -10, -9, -8, -7, -6, -5, -4, -3, -2, -1,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+    10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+    30, 31, 32, 33, 34, 35, 38, 40, 43, 46,
+    49, 53, 58, 65, 73, 82, 92, 103, 115, 127,
+)
+
+DX7_PITCH_RATE = (
+    1, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9,
+    10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 16, 16, 17,
+    18, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 30, 31,
+    33, 34, 36, 37, 38, 39, 41, 42, 44, 46, 47, 49, 51, 53,
+    54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 74, 76, 79, 82,
+    85, 88, 91, 94, 98, 102, 106, 110, 115, 120, 125, 130,
+    135, 141, 147, 153, 159, 165, 171, 178, 185, 193, 202,
+    211, 232, 243, 254, 255,
+)
+
 # Operator order is OP6, OP5, ... OP1, identical to a DX7 bulk dump and to
 # Google's Apache-2.0 msfa FM engine.  The bit meanings are documented in RTL.
 ALGORITHM_FLAGS = (
@@ -295,11 +323,25 @@ def operator_frequency_word(op: dict) -> int:
         # DX7 fixed-mode coarse selects a power-of-ten decade; fine moves
         # continuously inside it.  Direct phase increment is Q0.32.
         frequency = 10.0 ** ((coarse & 3) + fine / 100.0)
-        frequency *= 2.0 ** ((op["detune"] - 7) / 1200.0)
+        frequency *= _detune_ratio(op["detune"])
         return int(_clamp(round(frequency / SAMPLE_RATE * 2**32), 0, 0xFFFFFFFF))
     ratio = (0.5 if coarse == 0 else float(coarse)) * (1.0 + fine / 100.0)
-    ratio *= 2.0 ** (((op["detune"] - 7) * 2.0) / 1200.0)
+    ratio *= _detune_ratio(op["detune"])
     return int(_clamp(round(ratio * 65536.0), 0, 0xFFFFFFFF))
+
+
+def _detune_ratio(detune: int) -> float:
+    """Return the DX7's deliberately shallow, nonlinear detune ratio.
+
+    The old implementation assumed two cents per step and made stacked
+    operators audibly too wide.  The calibrated table keeps the centre exact
+    and reaches about seven cents at either end.  Real DX7 detune also has a
+    small note dependency; that is documented as a remaining compatibility
+    item because implementing it belongs in the Note-On datapath.
+    """
+    cents = (-7.0, -5.6, -4.4, -3.4, -2.5, -1.7, -0.8,
+             0.0, 0.8, 1.7, 2.5, 3.4, 4.4, 5.6, 7.0)
+    return 2.0 ** (cents[int(_clamp(detune, 0, 14))] / 1200.0)
 
 
 def output_level_gain_q14(level: int) -> int:
@@ -376,10 +418,24 @@ def envelope_coefficient(rate: int) -> int:
 
 
 def pitch_ratio_q16(level: int) -> int:
-    # DX pitch-EG level 50 is the centre.  This musical approximation limits
-    # the imported range to roughly +/-12 semitones for safe live audition.
-    semitones = (level - 50) * (12.0 / 49.0)
-    return int(_clamp(round((2.0 ** (semitones / 12.0)) * 65536.0), 0, 0x1FFFF))
+    """Compile a DX7 Pitch-EG level to unsigned Q5.16.
+
+    Q5.16 is wide enough for the full roughly 1/16x..16x Yamaha range.  The
+    function name is kept for API compatibility with existing editor code.
+    """
+    pitch_units = DX7_PITCH_LEVEL[int(_clamp(level, 0, 99))]
+    ratio = 2.0 ** (pitch_units / 32.0)
+    return int(_clamp(round(ratio * 65536.0), 0, 0x1FFFFF))
+
+
+def pitch_envelope_coefficient(rate: int) -> int:
+    """Map the Yamaha Pitch-EG rate table into the FPGA Q0.16 mover.
+
+    This retains the stable monotonic one-pole hardware while using the
+    measured Yamaha rate law instead of reusing the operator-EG time formula.
+    """
+    value = DX7_PITCH_RATE[int(_clamp(rate, 0, 99))]
+    return int(_clamp(round((value / 255.0) ** 2.35 * 65535.0), 1, 0xFFFF))
 
 
 def keyboard_gain_q14(op: dict, note: int) -> int:
@@ -397,7 +453,9 @@ def patch_packets(raw_patch: dict) -> list[bytes]:
     lfo = patch["lfo"]
     global_payload = bytearray(8)
     global_payload[0] = patch["algorithm"] - 1
-    global_payload[1] = patch["feedback"] | (int(patch["osc_sync"]) << 3)
+    global_payload[1] = (patch["feedback"] |
+                         (int(patch["osc_sync"]) << 3) |
+                         (int(lfo.get("sync", True)) << 4))
     global_payload[2] = patch["transpose"]
     global_payload[3] = lfo["waveform"]
     global_payload[4] = lfo["speed"]
@@ -414,7 +472,9 @@ def patch_packets(raw_patch: dict) -> list[bytes]:
         payload[0] = op_index
         payload[1] = int(op["enabled"]) | (int(op["mode"] == "fixed") << 1)
         struct.pack_into("<I", payload, 2, operator_frequency_word(op))
-        struct.pack_into("<H", payload, 6, output_level_gain_q14(op["output_level"]))
+        # The FPGA now evaluates keyboard scaling at Note On.  Send the raw
+        # output level so one compact preset replaces the old 768-word table.
+        struct.pack_into("<H", payload, 6, op["output_level"])
         packets.append(make_packet(CMD_FM_OPERATOR, bytes(payload)))
         for stage in range(4):
             env_payload = bytearray(8)
@@ -432,18 +492,11 @@ def patch_packets(raw_patch: dict) -> list[bytes]:
                                op["right_depth"], op["left_curve"],
                                op["right_curve"], 0, 0))
         packets.append(make_packet(CMD_FM_SCALING, scale_payload))
-        for note in range(128):
-            gain_payload = bytearray(8)
-            gain_payload[0] = op_index
-            gain_payload[1] = note
-            struct.pack_into("<h", gain_payload, 2,
-                             dx7_keyboard_level_offset(op, note))
-            packets.append(make_packet(CMD_FM_NOTE_GAIN, bytes(gain_payload)))
     for stage in range(4):
         payload = bytearray(8)
         payload[0] = stage
         struct.pack_into("<H", payload, 1,
-                         envelope_coefficient(patch["pitch_eg_rates"][stage]))
+                         pitch_envelope_coefficient(patch["pitch_eg_rates"][stage]))
         ratio = pitch_ratio_q16(patch["pitch_eg_levels"][stage])
         payload[3:6] = ratio.to_bytes(3, "little")
         packets.append(make_packet(CMD_FM_PITCH_ENVELOPE, bytes(payload)))

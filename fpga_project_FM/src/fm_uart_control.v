@@ -10,6 +10,8 @@ module fm_uart_control (
     input  wire        clk,
     input  wire        reset_n,
     input  wire        uart_rx_pin,
+    input  wire        preset_select_valid,
+    input  wire [4:0]  preset_select,
 
     output reg  [31:0] midi_event_data,
     output reg         midi_event_valid,
@@ -30,6 +32,7 @@ module fm_uart_control (
     output reg  [2:0]  fm_lfo_waveform,
     output reg  [6:0]  fm_lfo_speed,
     output reg  [6:0]  fm_lfo_delay,
+    output reg         fm_lfo_sync,
     output reg  [6:0]  fm_lfo_pitch_depth,
     output reg  [6:0]  fm_lfo_amp_depth,
     output reg  [2:0]  fm_pitch_mod_sensitivity,
@@ -61,7 +64,7 @@ module fm_uart_control (
     output reg         fm_pitch_envelope_write_valid,
     output reg  [1:0]  fm_pitch_envelope_stage,
     output reg  [15:0] fm_pitch_envelope_coefficient,
-    output reg  [16:0] fm_pitch_envelope_ratio,
+    output reg  [20:0] fm_pitch_envelope_ratio,
     output reg         fm_algorithm_flags_write_valid,
     output reg  [47:0] fm_algorithm_flags,
     output reg         fm_note_gain_write_valid,
@@ -70,7 +73,8 @@ module fm_uart_control (
     output reg         fm_patch_commit,
 
     output reg         packet_received,
-    output reg         packet_error
+    output reg         packet_error,
+    output reg  [4:0]  current_preset
 );
 
     localparam [3:0] WAIT_A5  = 4'd0;
@@ -92,6 +96,34 @@ module fm_uart_control (
     reg  [7:0] command;
     reg  [63:0] payload;
     reg  [7:0] checksum;
+
+    reg [63:0] preset_global_memory [0:31];
+    reg [63:0] preset_operator_memory [0:191];
+    reg [39:0] preset_scaling_memory [0:191];
+    reg [23:0] preset_envelope_memory [0:767];
+    reg [39:0] preset_pitch_memory [0:127];
+    reg [47:0] preset_algorithm_memory [0:31];
+    initial begin
+        $readmemh("src/generated/fm_rom1a_global.mem", preset_global_memory);
+        $readmemh("src/generated/fm_rom1a_operator.mem", preset_operator_memory);
+        $readmemh("src/generated/fm_rom1a_scaling.mem", preset_scaling_memory);
+        $readmemh("src/generated/fm_rom1a_envelope.mem", preset_envelope_memory);
+        $readmemh("src/generated/fm_rom1a_pitch.mem", preset_pitch_memory);
+        $readmemh("src/generated/fm_rom1a_algorithm.mem", preset_algorithm_memory);
+    end
+    reg [5:0] preset_load_state;
+    reg [2:0] preset_op_index;
+    reg [4:0] preset_eg_index;
+    reg [2:0] preset_pitch_index;
+    reg       preset_read_wait;
+    wire [7:0] preset_op_address = current_preset * 6 + preset_op_index;
+    wire [9:0] preset_eg_address = current_preset * 24 + preset_eg_index;
+    wire [6:0] preset_pitch_address = current_preset * 4 + preset_pitch_index;
+    wire [63:0] preset_global_word = preset_global_memory[current_preset];
+    wire [63:0] preset_operator_word = preset_operator_memory[preset_op_address];
+    wire [39:0] preset_scaling_word = preset_scaling_memory[preset_op_address];
+    wire [23:0] preset_envelope_word = preset_envelope_memory[preset_eg_address];
+    wire [39:0] preset_pitch_word = preset_pitch_memory[preset_pitch_address];
 
     uart_rx #(.CLKS_PER_BIT(434)) u_uart_rx (
         .clk(clk), .reset_n(reset_n), .rx(uart_rx_pin),
@@ -123,6 +155,7 @@ module fm_uart_control (
             fm_lfo_waveform <= 3'd4;
             fm_lfo_speed <= 7'd35;
             fm_lfo_delay <= 7'd20;
+            fm_lfo_sync <= 1'b1;
             fm_lfo_pitch_depth <= 7'd0;
             fm_lfo_amp_depth <= 7'd0;
             fm_pitch_mod_sensitivity <= 3'd3;
@@ -152,7 +185,7 @@ module fm_uart_control (
             fm_pitch_envelope_write_valid <= 1'b0;
             fm_pitch_envelope_stage <= 2'd0;
             fm_pitch_envelope_coefficient <= 16'd1;
-            fm_pitch_envelope_ratio <= 17'h10000;
+            fm_pitch_envelope_ratio <= 21'h10000;
             fm_algorithm_flags_write_valid <= 1'b0;
             fm_algorithm_flags <= 48'h1401140114c1;
             fm_note_gain_write_valid <= 1'b0;
@@ -161,6 +194,12 @@ module fm_uart_control (
             fm_patch_commit <= 1'b0;
             packet_received <= 1'b0;
             packet_error <= 1'b0;
+            current_preset <= 5'd0;
+            preset_load_state <= 6'd1;
+            preset_op_index <= 3'd0;
+            preset_eg_index <= 5'd0;
+            preset_pitch_index <= 3'd0;
+            preset_read_wait <= 1'b0;
         end else begin
             fm_global_write_valid <= 1'b0;
             fm_operator_write_valid <= 1'b0;
@@ -222,6 +261,7 @@ module fm_uart_control (
                                     fm_algorithm <= payload[4:0];
                                     fm_feedback <= payload[10:8];
                                     fm_osc_sync <= payload[11];
+                                    fm_lfo_sync <= payload[12];
                                     fm_transpose <= (payload[23:16] > 48)
                                         ? 7'd48 : payload[22:16];
                                     fm_lfo_waveform <= payload[26:24];
@@ -279,7 +319,7 @@ module fm_uart_control (
                                     if (payload[7:0] < 4) begin
                                         fm_pitch_envelope_stage <= payload[1:0];
                                         fm_pitch_envelope_coefficient <= payload[23:8];
-                                        fm_pitch_envelope_ratio <= payload[40:24];
+                                    fm_pitch_envelope_ratio <= payload[44:24];
                                         fm_pitch_envelope_write_valid <= 1'b1;
                                     end else packet_error <= 1'b1;
                                 end
@@ -300,6 +340,115 @@ module fm_uart_control (
                         end
                     end
                     default: parser_state <= WAIT_A5;
+                endcase
+            end
+
+            // The physical TRANSPOSE knob selects one of the 32 ROM1A
+            // patches. Loading takes under 100 clocks and first silences the
+            // old patch, so no voice can hear a half-old/half-new parameter
+            // set. UART patch editing remains available while idle.
+            if (preset_select_valid && preset_load_state == 0) begin
+                current_preset <= preset_select;
+                preset_op_index <= 0;
+                preset_eg_index <= 0;
+                preset_pitch_index <= 0;
+                preset_read_wait <= 1'b0;
+                fm_patch_commit <= 1'b1;
+                preset_load_state <= 1;
+            end else if (preset_load_state != 0) begin
+                case (preset_load_state)
+                    1: begin
+                        if (!preset_read_wait) begin
+                            preset_read_wait <= 1'b1;
+                        end else begin
+                        preset_read_wait <= 1'b0;
+                        fm_algorithm <= preset_global_word[4:0];
+                        fm_feedback <= preset_global_word[7:5];
+                        fm_osc_sync <= preset_global_word[8];
+                        fm_lfo_sync <= preset_global_word[9];
+                        fm_transpose <= preset_global_word[16:10];
+                        fm_lfo_waveform <= preset_global_word[19:17];
+                        fm_lfo_speed <= preset_global_word[26:20];
+                        fm_lfo_delay <= preset_global_word[33:27];
+                        fm_lfo_pitch_depth <= preset_global_word[40:34];
+                        fm_lfo_amp_depth <= preset_global_word[47:41];
+                        fm_pitch_mod_sensitivity <= preset_global_word[50:48];
+                        fm_global_write_valid <= 1'b1;
+                        preset_load_state <= 2;
+                        end
+                    end
+                    2: begin
+                        if (!preset_read_wait) begin
+                            preset_read_wait <= 1'b1;
+                        end else begin
+                        preset_read_wait <= 1'b0;
+                        fm_operator_index <= preset_op_index;
+                        fm_operator_enable <= preset_operator_word[0];
+                        fm_operator_fixed <= preset_operator_word[1];
+                        fm_operator_frequency <= preset_operator_word[33:2];
+                        fm_operator_output_gain <= {9'd0, preset_operator_word[40:34]};
+                        fm_operator_write_valid <= 1'b1;
+                        fm_scaling_operator <= preset_op_index;
+                        fm_scaling_breakpoint <= preset_scaling_word[6:0];
+                        fm_scaling_left_depth <= preset_scaling_word[13:7];
+                        fm_scaling_right_depth <= preset_scaling_word[20:14];
+                        fm_scaling_left_curve <= preset_scaling_word[22:21];
+                        fm_scaling_right_curve <= preset_scaling_word[24:23];
+                        fm_rate_scaling <= preset_scaling_word[27:25];
+                        fm_velocity_sensitivity <= preset_scaling_word[30:28];
+                        fm_amp_mod_sensitivity <= preset_scaling_word[32:31];
+                        fm_scaling_write_valid <= 1'b1;
+                        if (preset_op_index == 5) begin
+                            preset_op_index <= 0;
+                            preset_load_state <= 3;
+                        end else preset_op_index <= preset_op_index + 1'b1;
+                        end
+                    end
+                    3: begin
+                        if (!preset_read_wait) begin
+                            preset_read_wait <= 1'b1;
+                        end else begin
+                        preset_read_wait <= 1'b0;
+                        fm_envelope_operator <= preset_eg_index[4:2];
+                        fm_envelope_stage <= preset_eg_index[1:0];
+                        fm_envelope_coefficient <= {10'd0, preset_envelope_word[5:0]};
+                        fm_envelope_level <= preset_envelope_word[21:6];
+                        fm_envelope_write_valid <= 1'b1;
+                        if (preset_eg_index == 23) begin
+                            preset_eg_index <= 0;
+                            preset_load_state <= 4;
+                        end else preset_eg_index <= preset_eg_index + 1'b1;
+                        end
+                    end
+                    4: begin
+                        if (!preset_read_wait) begin
+                            preset_read_wait <= 1'b1;
+                        end else begin
+                        preset_read_wait <= 1'b0;
+                        fm_pitch_envelope_stage <= preset_pitch_index[1:0];
+                        fm_pitch_envelope_coefficient <= preset_pitch_word[15:0];
+                        fm_pitch_envelope_ratio <= preset_pitch_word[36:16];
+                        fm_pitch_envelope_write_valid <= 1'b1;
+                        if (preset_pitch_index == 3) begin
+                            preset_pitch_index <= 0;
+                            preset_load_state <= 5;
+                        end else preset_pitch_index <= preset_pitch_index + 1'b1;
+                        end
+                    end
+                    5: begin
+                        if (!preset_read_wait) begin
+                            preset_read_wait <= 1'b1;
+                        end else begin
+                        preset_read_wait <= 1'b0;
+                        fm_algorithm_flags <= preset_algorithm_memory[current_preset];
+                        fm_algorithm_flags_write_valid <= 1'b1;
+                        preset_load_state <= 6;
+                        end
+                    end
+                    default: begin
+                        fm_patch_commit <= 1'b1;
+                        preset_load_state <= 0;
+                    end
                 endcase
             end
         end
